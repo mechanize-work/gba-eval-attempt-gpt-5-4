@@ -24,7 +24,7 @@ const CPU_CLOCK_HZ: u32 = 16_777_216;
 const DEFAULT_AUDIO_RATE: u32 = 32_768;
 const DOUBLE_AUDIO_RATE: u32 = 65_536;
 const BOOT_AUDIO_PREROLL_PAIRS: usize = 1_500;
-const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 296;
+const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 282;
 const INITIAL_AUDIO_FRACTION: u64 =
     CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * INITIAL_AUDIO_FIRST_PAIR_CYCLES as u64;
 
@@ -131,8 +131,10 @@ pub(crate) struct Emulator {
     cpu: Cpu,
     framebuffer: Vec<u32>,
     audio_buffer: Vec<i16>,
+    audio_prefilter_input_buffer: Vec<i16>,
     audio_prefilter_buffer: Vec<i16>,
     audio_capture_mode: AudioCaptureMode,
+    audio_prefilter_gain_num: i32,
     initial_audio_fraction: u64,
     audio_fraction: u64,
     audio_accum_left: i64,
@@ -194,8 +196,10 @@ impl Emulator {
             cpu: Cpu::new(),
             framebuffer: vec![0xff00_0000; SCREEN_WIDTH * SCREEN_HEIGHT],
             audio_buffer: Vec::with_capacity(4_096),
+            audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
             audio_capture_mode: AudioCaptureMode::Average,
+            audio_prefilter_gain_num: AUDIO_OUTPUT_PREFILTER_GAIN_NUM,
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_accum_left: 0,
@@ -260,6 +264,7 @@ impl Emulator {
         self.sram.fill(0);
         self.framebuffer.fill(0xff00_0000);
         self.audio_buffer.clear();
+        self.audio_prefilter_input_buffer.clear();
         self.audio_prefilter_buffer.clear();
         self.audio_fraction = self.initial_audio_fraction;
         self.audio_accum_left = 0;
@@ -374,6 +379,8 @@ impl Emulator {
             as usize;
         self.audio_buffer
             .resize(self.audio_buffer.len() + preroll_pairs * 2, 0);
+        self.audio_prefilter_input_buffer
+            .resize(self.audio_prefilter_input_buffer.len() + preroll_pairs * 2, 0);
         self.audio_prefilter_buffer
             .resize(self.audio_prefilter_buffer.len() + preroll_pairs * 2, 0);
     }
@@ -413,8 +420,10 @@ impl Emulator {
             ),
         };
         for _ in 0..pairs {
-            let (prefilter, output) =
+            let (prefilter_input, prefilter, output) =
                 self.filter_audio_output(((i32::from(avg_left) + i32::from(avg_right)) / 2) as i16);
+            self.audio_prefilter_input_buffer.push(prefilter_input);
+            self.audio_prefilter_input_buffer.push(prefilter_input);
             self.audio_prefilter_buffer.push(prefilter);
             self.audio_prefilter_buffer.push(prefilter);
             self.audio_buffer.push(output);
@@ -425,15 +434,16 @@ impl Emulator {
         self.audio_accum_cycles = 0;
     }
 
-    fn filter_audio_output(&mut self, sample: i16) -> (i16, i16) {
+    fn filter_audio_output(&mut self, sample: i16) -> (i16, i16, i16) {
         self.audio_delay_line.push_back(i32::from(sample));
         let delayed = if self.audio_delay_line.len() > self.audio_delay_pairs {
             self.audio_delay_line.pop_front().unwrap_or(0)
         } else {
             0
         };
-        let scaled = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
-        let scaled = Self::round_divide(scaled * AUDIO_OUTPUT_PREFILTER_GAIN_NUM, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
+        let prefilter_input = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
+        let scaled =
+            Self::round_divide(prefilter_input * self.audio_prefilter_gain_num, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
         let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
         for (tap, history) in AUDIO_OUTPUT_FILTER_TAPS[1..].iter().zip(self.audio_filter_history.iter()) {
             accum += *tap * *history;
@@ -520,7 +530,11 @@ impl Emulator {
         self.audio_final_filter_history
             .copy_within(0..final_history_len - 1, 1);
         self.audio_final_filter_history[0] = raw_output;
-        (scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16, corrected_output)
+        (
+            prefilter_input.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            corrected_output,
+        )
     }
 
     fn round_divide(value: i32, denominator: i32) -> i32 {
@@ -1507,6 +1521,10 @@ impl NativeEmulator {
         Ok(())
     }
 
+    pub fn set_audio_prefilter_gain_num_for_debug(&mut self, gain_num: i32) {
+        self.inner.audio_prefilter_gain_num = gain_num.clamp(120, 136);
+    }
+
     pub fn set_keys(&mut self, keys: u32) {
         self.inner.keys = (keys & 0x03ff) as u16;
     }
@@ -1537,6 +1555,10 @@ impl NativeEmulator {
 
     pub fn take_audio(&mut self) -> Vec<i16> {
         std::mem::take(&mut self.inner.audio_buffer)
+    }
+
+    pub fn take_prefilter_input_audio(&mut self) -> Vec<i16> {
+        std::mem::take(&mut self.inner.audio_prefilter_input_buffer)
     }
 
     pub fn take_prefilter_audio(&mut self) -> Vec<i16> {
@@ -1861,7 +1883,12 @@ mod tests {
         }
 
         assert_eq!(emu.audio_buffer.len(), outputs * 2);
+        assert_eq!(emu.audio_prefilter_input_buffer.len(), outputs * 2);
         assert_eq!(emu.audio_prefilter_buffer.len(), outputs * 2);
+        assert_eq!(
+            &emu.audio_prefilter_input_buffer[emu.audio_prefilter_input_buffer.len() - 4..],
+            &[1024, 1024, 1024, 1024]
+        );
         assert_eq!(
             &emu.audio_prefilter_buffer[emu.audio_prefilter_buffer.len() - 4..],
             &[1056, 1056, 1056, 1056]
@@ -1878,7 +1905,7 @@ mod tests {
         emu.audio_delay_line
             .extend(std::iter::repeat_n(16_000, AUDIO_OUTPUT_DELAY_PAIRS));
 
-        let (prefilter, output) = emu.filter_audio_output(0);
+        let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_125);
         assert_eq!(output, 3_412);
@@ -1890,7 +1917,7 @@ mod tests {
         emu.audio_delay_line
             .extend(std::iter::repeat_n(-16_000, AUDIO_OUTPUT_DELAY_PAIRS));
 
-        let (prefilter, output) = emu.filter_audio_output(0);
+        let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_125);
         assert_eq!(output, -3_253);
