@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-params \"key=value ...\"] [--audio-capture average|midpoint|point:<num>/<den>|endpoint|endpoint-after-timer] [--audio-mix legacy|stereo-average|left|right] [--sound-dma-threshold n] [--sound-dma-prime fill|single|disabled] [--sound-dma-refill immediate|next-pop]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-params \"key=value ...\"] [--audio-capture average|midpoint|point:<num>/<den>|point-blend:<num>/<den>:<blend_num>/<blend_den>|endpoint|endpoint-after-timer] [--audio-mix legacy|stereo-average|left|right] [--sound-dma-threshold n] [--sound-dma-prime fill|single|disabled] [--sound-dma-refill immediate|next-pop]"
                 .to_string()
         })?;
     let frames: u32 = args

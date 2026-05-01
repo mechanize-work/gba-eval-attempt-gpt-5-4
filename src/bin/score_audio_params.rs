@@ -49,7 +49,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let rom_path = args.next().ok_or_else(|| {
-        "usage: score_audio_params <rom> --dataset <frames> <oracle.wav> [--dataset ...] [--candidate \"key=value ...\"] [--candidate-file file]"
+        "usage: score_audio_params <rom> --dataset <frames> <oracle.wav> [--dataset ...] [--candidate \"key=value ...\"] [--candidate-file file] (candidate specs may include capture=<mode>)"
             .to_string()
     })?;
 
@@ -119,7 +119,7 @@ fn run() -> Result<(), String> {
             let mut emu =
                 NativeEmulator::new_with_rom(&rom).ok_or_else(|| "failed to initialize emulator".to_string())?;
             if let Some(spec) = &candidate.spec {
-                emu.set_audio_params_for_debug(spec)?;
+                apply_candidate_spec(&mut emu, spec)?;
             }
             for _ in 0..dataset.frames {
                 emu.run_frame();
@@ -180,12 +180,43 @@ fn load_candidate_specs(path: &Path) -> Result<Vec<String>, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if !trimmed.contains("dead=") && !trimmed.contains("pregain=") {
+        if !trimmed.contains("dead=") && !trimmed.contains("pregain=") && !trimmed.contains("capture=") {
             continue;
         }
         specs.push(trimmed.to_string());
     }
     Ok(specs)
+}
+
+fn apply_candidate_spec(emu: &mut NativeEmulator, spec: &str) -> Result<(), String> {
+    let mut audio_params = Vec::new();
+    let mut capture_mode = None;
+
+    for token in spec.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+        let token = token.trim();
+        if token.is_empty() || !token.contains('=') {
+            continue;
+        }
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        if matches!(key, "total_rmse" | "objective_total" | "total_peak_overage") {
+            continue;
+        }
+        if key == "capture" {
+            capture_mode = Some(value.to_string());
+            continue;
+        }
+        audio_params.push(format!("{key}={value}"));
+    }
+
+    if let Some(mode) = capture_mode {
+        emu.set_audio_capture_mode_for_debug(&mode)?;
+    }
+    if !audio_params.is_empty() {
+        emu.set_audio_params_for_debug(&audio_params.join(" "))?;
+    }
+    Ok(())
 }
 
 fn compact_candidate_label(spec: &str) -> String {
