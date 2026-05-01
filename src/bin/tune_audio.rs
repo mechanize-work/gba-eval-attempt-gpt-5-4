@@ -92,6 +92,8 @@ struct Dataset {
 #[derive(Clone)]
 struct CandidateScore {
     total_rmse: f64,
+    objective_total: f64,
+    total_peak_overage: i32,
     rmses: Vec<f64>,
     first_nonzero_pairs: Vec<usize>,
     peaks: Vec<i32>,
@@ -228,6 +230,7 @@ fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mut max_first_regression = 0.01f64;
     let mut max_peak_overage: Option<i32> = None;
+    let mut peak_penalty_weight = 0.0f64;
     let mut require_first_nonzero_match = false;
     let mut raw_pair_input = false;
     let mut start_params = AudioOutputParams::default();
@@ -257,6 +260,17 @@ fn run() -> Result<(), String> {
                     return Err("peak overage value must be nonnegative".to_string());
                 }
                 max_peak_overage = Some(parsed);
+            }
+            "--peak-penalty-weight" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing peak penalty weight".to_string())?;
+                peak_penalty_weight = value
+                    .parse::<f64>()
+                    .map_err(|_| "peak penalty weight must be a number".to_string())?;
+                if peak_penalty_weight < 0.0 {
+                    return Err("peak penalty weight must be nonnegative".to_string());
+                }
             }
             "--require-first-nonzero-match" => require_first_nonzero_match = true,
             "--raw-pair-input" => raw_pair_input = true,
@@ -361,7 +375,7 @@ fn run() -> Result<(), String> {
 
     if positional.len() < 2 || positional.len() % 2 != 0 {
         return Err(
-            "usage: tune_audio [--max-first-regression value] [--max-peak-overage value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
+            "usage: tune_audio [--max-first-regression value] [--max-peak-overage value] [--peak-penalty-weight value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
                 .to_string(),
         );
     }
@@ -389,7 +403,7 @@ fn run() -> Result<(), String> {
     }
 
     let baseline_params = start_params;
-    let baseline = score_candidate(&datasets, baseline_params, raw_pair_input);
+    let baseline = score_candidate(&datasets, baseline_params, raw_pair_input, peak_penalty_weight);
     print_score("baseline", baseline_params, &datasets, &baseline);
 
     let best = search(
@@ -398,6 +412,7 @@ fn run() -> Result<(), String> {
         &baseline,
         max_first_regression,
         max_peak_overage,
+        peak_penalty_weight,
         require_first_nonzero_match,
         raw_pair_input,
     );
@@ -423,6 +438,7 @@ fn search(
     baseline: &CandidateScore,
     max_first_regression: f64,
     max_peak_overage: Option<i32>,
+    peak_penalty_weight: f64,
     require_first_nonzero_match: bool,
     raw_pair_input: bool,
 ) -> Option<(AudioOutputParams, CandidateScore)> {
@@ -454,6 +470,7 @@ fn search(
                     baseline,
                     max_first_regression,
                     max_peak_overage,
+                    peak_penalty_weight,
                     require_first_nonzero_match,
                     raw_pair_input,
                     candidate,
@@ -474,6 +491,7 @@ fn search(
                             baseline,
                             max_first_regression,
                             max_peak_overage,
+                            peak_penalty_weight,
                             require_first_nonzero_match,
                             raw_pair_input,
                             candidate,
@@ -486,7 +504,7 @@ fn search(
 
         match (&best, &round_best) {
             (Some((_, best_score)), Some((round_best_params, round_best_score)))
-                if round_best_score.total_rmse + 1e-9 < best_score.total_rmse =>
+                if round_best_score.objective_total + 1e-9 < best_score.objective_total =>
             {
                 improved = true;
                 best = Some((*round_best_params, round_best_score.clone()));
@@ -511,12 +529,13 @@ fn consider_candidate(
     baseline: &CandidateScore,
     max_first_regression: f64,
     max_peak_overage: Option<i32>,
+    peak_penalty_weight: f64,
     require_first_nonzero_match: bool,
     raw_pair_input: bool,
     params: AudioOutputParams,
     best: &mut Option<(AudioOutputParams, CandidateScore)>,
 ) {
-    let score = score_candidate(datasets, params, raw_pair_input);
+    let score = score_candidate(datasets, params, raw_pair_input, peak_penalty_weight);
     if score.rmses[0] > baseline.rmses[0] + max_first_regression {
         return;
     }
@@ -527,7 +546,7 @@ fn consider_candidate(
         return;
     }
     match best {
-        Some((_, best_score)) if score.total_rmse + 1e-9 < best_score.total_rmse => {
+        Some((_, best_score)) if score.objective_total + 1e-9 < best_score.objective_total => {
             *best = Some((params, score));
         }
         None => {
@@ -556,20 +575,29 @@ fn matches_peak_overage(datasets: &[Dataset], score: &CandidateScore, max_peak_o
         .all(|(peak, dataset)| *peak <= dataset.reference_peak + max_peak_overage)
 }
 
-fn score_candidate(datasets: &[Dataset], params: AudioOutputParams, raw_pair_input: bool) -> CandidateScore {
-    let mut total = 0.0;
+fn score_candidate(
+    datasets: &[Dataset],
+    params: AudioOutputParams,
+    raw_pair_input: bool,
+    peak_penalty_weight: f64,
+) -> CandidateScore {
+    let mut total_rmse = 0.0;
+    let mut total_peak_overage = 0;
     let mut rmses = Vec::with_capacity(datasets.len());
     let mut first_nonzero_pairs = Vec::with_capacity(datasets.len());
     let mut peaks = Vec::with_capacity(datasets.len());
     for dataset in datasets {
         let (rmse, first_nonzero_pair, peak) = evaluate_dataset(dataset, params, raw_pair_input);
-        total += rmse;
+        total_rmse += rmse;
+        total_peak_overage += (peak - dataset.reference_peak).max(0);
         rmses.push(rmse);
         first_nonzero_pairs.push(first_nonzero_pair);
         peaks.push(peak);
     }
     CandidateScore {
-        total_rmse: total,
+        total_rmse,
+        objective_total: total_rmse + peak_penalty_weight * f64::from(total_peak_overage),
+        total_peak_overage,
         rmses,
         first_nonzero_pairs,
         peaks,
@@ -726,7 +754,7 @@ fn filter_audio_sample(
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} icur={} iprev={} pregain={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} fnonzero={} total_rmse={:.6}",
+        "{label} dead={} icur={} iprev={} pregain={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} fnonzero={} total_rmse={:.6} objective_total={:.6} total_peak_overage={}",
         params.deadzone,
         params.input_filter_cur,
         params.input_filter_prev,
@@ -748,7 +776,9 @@ fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], sco
         params.final_filter_prev2,
         params.final_filter_prev3,
         params.final_nonzero_bias,
-        score.total_rmse
+        score.total_rmse,
+        score.objective_total,
+        score.total_peak_overage,
     );
     for (((dataset, rmse), first_nonzero_pair), peak) in datasets
         .iter()
