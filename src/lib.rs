@@ -67,8 +67,10 @@ const DIRECT_SOUND_FIFO_CAPACITY: usize = 32;
 const DIRECT_SOUND_FIFO_DMA_THRESHOLD: usize = 16;
 const AUDIO_OUTPUT_SCALE: i32 = 64;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
-const AUDIO_OUTPUT_GAIN_NUM: i32 = 7;
-const AUDIO_OUTPUT_GAIN_DEN: i32 = 32;
+const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
+const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
+const AUDIO_OUTPUT_FILTER_TAPS: [i32; 3] = [11, 6, -1];
+const AUDIO_OUTPUT_FILTER_DEN: i32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -103,6 +105,7 @@ pub(crate) struct Emulator {
     audio_accum_right: i64,
     audio_accum_cycles: u32,
     audio_delay_line: VecDeque<i32>,
+    audio_filter_history: [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     active_dma_channel: Option<usize>,
     fifo_a: VecDeque<i8>,
     fifo_b: VecDeque<i8>,
@@ -157,6 +160,7 @@ impl Emulator {
             audio_accum_right: 0,
             audio_accum_cycles: 0,
             audio_delay_line: VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1),
+            audio_filter_history: [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
             active_dma_channel: None,
             fifo_a: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
             fifo_b: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
@@ -214,6 +218,7 @@ impl Emulator {
         self.audio_accum_right = 0;
         self.audio_accum_cycles = 0;
         self.audio_delay_line.clear();
+        self.audio_filter_history.fill(0);
         self.active_dma_channel = None;
         self.fifo_a.clear();
         self.fifo_b.clear();
@@ -363,7 +368,23 @@ impl Emulator {
             0
         };
         let scaled = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
-        scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        let filtered = Self::round_divide(
+            AUDIO_OUTPUT_FILTER_TAPS[0] * scaled
+                + AUDIO_OUTPUT_FILTER_TAPS[1] * self.audio_filter_history[0]
+                + AUDIO_OUTPUT_FILTER_TAPS[2] * self.audio_filter_history[1],
+            AUDIO_OUTPUT_FILTER_DEN,
+        );
+        self.audio_filter_history[1] = self.audio_filter_history[0];
+        self.audio_filter_history[0] = scaled;
+        filtered.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    }
+
+    fn round_divide(value: i32, denominator: i32) -> i32 {
+        if value >= 0 {
+            (value + denominator / 2) / denominator
+        } else {
+            -((-value + denominator / 2) / denominator)
+        }
     }
 
     fn mix_audio_level(&self) -> (i32, i32) {
@@ -1632,20 +1653,21 @@ mod tests {
     #[test]
     fn direct_sound_generates_nonzero_pcm() {
         let mut emu = Emulator::new();
+        let outputs = AUDIO_OUTPUT_DELAY_PAIRS + AUDIO_OUTPUT_FILTER_TAPS.len();
 
         emu.write_io_u16(REG_SOUNDCNT_H, 0x0304);
         emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
         emu.write_io_u8(REG_FIFO_A, 0x10);
         emu.direct_sound_a_sample = 0x10;
 
-        for _ in 0..=AUDIO_OUTPUT_DELAY_PAIRS {
+        for _ in 0..outputs {
             emu.emit_audio_for_cycles(512);
         }
 
-        assert_eq!(emu.audio_buffer.len(), (AUDIO_OUTPUT_DELAY_PAIRS + 1) * 2);
+        assert_eq!(emu.audio_buffer.len(), outputs * 2);
         assert_eq!(
-            &emu.audio_buffer[emu.audio_buffer.len() - 2..],
-            &[896, 896]
+            &emu.audio_buffer[emu.audio_buffer.len() - 6..],
+            &[704, 704, 1088, 1088, 1024, 1024]
         );
     }
 
