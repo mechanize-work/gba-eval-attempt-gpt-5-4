@@ -359,11 +359,6 @@ impl Emulator {
         let prev = self.io_read_u16_raw(REG_IF);
         self.io_write_u16_raw(REG_IF, prev | irq_mask);
 
-        if self.io_read_u16_raw(REG_IE) & irq_mask != 0 {
-            let flags = self.read_u16_mapped(0x03ff_fff8);
-            self.write_u16_mapped(0x03ff_fff8, flags | irq_mask);
-        }
-
         self.poll_halt_wakeup();
     }
 
@@ -1288,5 +1283,16 @@ mod tests {
         assert_eq!(emu.read_u16_mapped(0x0400_0100), 0xffff);
         assert_eq!(emu.read_u16_mapped(0x0400_0104), 0xfffe);
         assert_eq!(emu.io_read_u16_raw(REG_IF) & IRQ_TIMER1, IRQ_TIMER1);
+    }
+
+    #[test]
+    fn interrupt_request_does_not_preseed_bios_intrwait_flags() {
+        let mut emu = Emulator::new();
+        emu.io_write_u16_raw(REG_IE, IRQ_VBLANK);
+
+        emu.raise_interrupt(IRQ_VBLANK);
+
+        assert_eq!(emu.io_read_u16_raw(REG_IF) & IRQ_VBLANK, IRQ_VBLANK);
+        assert_eq!(emu.read_u16_mapped(0x03ff_fff8), 0);
     }
 }
