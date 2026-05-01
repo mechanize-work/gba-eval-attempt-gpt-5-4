@@ -23,6 +23,7 @@ const CPU_CLOCK_HZ: u32 = 16_777_216;
 const DEFAULT_AUDIO_RATE: u32 = 32_768;
 const DOUBLE_AUDIO_RATE: u32 = 65_536;
 const BOOT_AUDIO_PREROLL_PAIRS: usize = 1_500;
+const INITIAL_AUDIO_FRACTION: u64 = CPU_CLOCK_HZ as u64 / 4;
 
 const CYCLES_PER_LINE: u32 = 1_232;
 const HDRAW_CYCLES: u32 = 1_006;
@@ -106,7 +107,7 @@ impl Emulator {
             cpu: Cpu::new(),
             framebuffer: vec![0xff00_0000; SCREEN_WIDTH * SCREEN_HEIGHT],
             audio_buffer: Vec::with_capacity(4_096),
-            audio_fraction: 0,
+            audio_fraction: INITIAL_AUDIO_FRACTION,
             keys: 0,
             frame_cycle: 0,
             halted: false,
@@ -140,7 +141,7 @@ impl Emulator {
         self.sram.fill(0);
         self.framebuffer.fill(0xff00_0000);
         self.audio_buffer.clear();
-        self.audio_fraction = 0;
+        self.audio_fraction = INITIAL_AUDIO_FRACTION;
         self.keys = 0;
         self.frame_cycle = 0;
         self.halted = false;
@@ -1010,5 +1011,23 @@ mod tests {
         assert_eq!(emu.cpu.debug_reg(1), 2);
         assert_eq!(emu.cpu.pc(), 0x0300_0004);
         assert_eq!(emu.io_read_u16_raw(REG_IF) & IRQ_HBLANK, IRQ_HBLANK);
+    }
+
+    #[test]
+    fn startup_audio_drain_matches_oracle_pair_schedule() {
+        let mut emu = Emulator::new();
+        let expected_pairs = [2048, 549, 549, 548, 549, 549, 548, 549, 548, 549, 549, 548];
+
+        for (frame, expected) in expected_pairs.into_iter().enumerate() {
+            emu.append_silence_for_frame();
+            assert_eq!(
+                emu.audio_buffer.len() / 2,
+                expected,
+                "unexpected audio pair count at frame {}",
+                frame + 1
+            );
+            emu.audio_buffer.clear();
+            emu.frames_emulated += 1;
+        }
     }
 }
