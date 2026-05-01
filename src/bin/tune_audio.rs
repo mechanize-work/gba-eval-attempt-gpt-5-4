@@ -8,7 +8,7 @@ const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [125, 9, -4, -1];
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [125, 9, 2, -4];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
@@ -44,23 +44,23 @@ impl Default for AudioOutputParams {
     fn default() -> Self {
         // Keep these in sync with the late-stage audio constants in `src/lib.rs`.
         Self {
-            deadzone: 5,
+            deadzone: 0,
             compress_threshold_positive: 2_400,
             compress_threshold_negative: 2_100,
-            compress_num_positive: 127,
+            compress_num_positive: 128,
             compress_num_negative: 127,
-            positive_bias: 71,
+            positive_bias: 70,
             negative_bias: 81,
-            post_filter_cur: 128,
-            post_filter_prev: 1,
-            post_filter_prev2: -2,
+            post_filter_cur: 135,
+            post_filter_prev: -8,
+            post_filter_prev2: -3,
             post_filter_positive_bias: 0,
             post_filter_negative_bias: -11,
             sign_hysteresis: 22,
             final_filter_cur: 125,
             final_filter_prev: 9,
-            final_filter_prev2: -4,
-            final_filter_prev3: -1,
+            final_filter_prev2: 2,
+            final_filter_prev3: -4,
         }
     }
 }

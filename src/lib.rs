@@ -24,7 +24,7 @@ const CPU_CLOCK_HZ: u32 = 16_777_216;
 const DEFAULT_AUDIO_RATE: u32 = 32_768;
 const DOUBLE_AUDIO_RATE: u32 = 65_536;
 const BOOT_AUDIO_PREROLL_PAIRS: usize = 1_500;
-const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 348;
+const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 320;
 const INITIAL_AUDIO_FRACTION: u64 =
     CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * INITIAL_AUDIO_FIRST_PAIR_CYCLES as u64;
 
@@ -73,24 +73,24 @@ const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
 const AUDIO_OUTPUT_FILTER_TAPS: [i32; 8] = [49, 11, -3, 18, -15, 3, 7, -6];
 const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
-const AUDIO_OUTPUT_DEADZONE: i32 = 5;
+const AUDIO_OUTPUT_DEADZONE: i32 = 0;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_400;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_100;
-const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 127;
+const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
-const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 71;
+const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 70;
 const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 81;
-const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 128;
-const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = 1;
-const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -2;
+const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 135;
+const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -8;
+const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -3;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 0;
 const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -11;
 const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 22;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [125, 9, -4, -1];
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [125, 9, 2, -4];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1746,7 +1746,7 @@ mod tests {
     #[test]
     fn startup_audio_drain_matches_oracle_pair_schedule() {
         let mut emu = Emulator::new();
-        let expected_pairs = [2048, 549, 549, 548, 549, 549, 548, 549, 548, 549, 549, 548];
+        let expected_pairs = [2049, 548, 549, 548, 549, 549, 548, 549, 549, 548, 549, 548];
 
         for (frame, expected) in expected_pairs.into_iter().enumerate() {
             emu.append_boot_audio_preroll();
@@ -1810,7 +1810,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[829, 829, 1067, 1067, 994, 994, 1254, 1254, 1045, 1045, 1059, 1059, 1179, 1179, 1096, 1096, 1083, 1083]
+            &[873, 873, 1065, 1065, 1009, 1009, 1270, 1270, 1024, 1024, 1069, 1069, 1177, 1177, 1089, 1089, 1085, 1085]
         );
     }
 
@@ -1823,7 +1823,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_000);
-        assert_eq!(output, 3_032);
+        assert_eq!(output, 3_202);
     }
 
     #[test]
@@ -1835,7 +1835,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -2_893);
+        assert_eq!(output, -3_050);
     }
 
     #[test]
