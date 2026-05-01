@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-audio file.wav]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav]"
                 .to_string()
         })?;
     let frames: u32 = args
@@ -29,6 +29,7 @@ fn run() -> Result<(), String> {
     let mut dump_frame_path: Option<String> = None;
     let mut dump_audio_path: Option<String> = None;
     let mut dump_prefilter_audio_path: Option<String> = None;
+    let mut compare_audio_path: Option<String> = None;
     let mut trace_frames = false;
     let mut step_count: u64 = 0;
     let mut trace_steps = false;
@@ -46,6 +47,9 @@ fn run() -> Result<(), String> {
             "--dump-audio" => dump_audio_path = Some(args.next().ok_or_else(|| "missing audio path".to_string())?),
             "--dump-prefilter-audio" => {
                 dump_prefilter_audio_path = Some(args.next().ok_or_else(|| "missing prefilter audio path".to_string())?)
+            }
+            "--compare-audio" => {
+                compare_audio_path = Some(args.next().ok_or_else(|| "missing comparison audio path".to_string())?)
             }
             "--trace-frames" => trace_frames = true,
             "--trace-until-steps" => trace_until_steps = true,
@@ -223,6 +227,22 @@ fn run() -> Result<(), String> {
     println!("audio_pairs={}", all_audio.len() / 2);
     println!("audio_rate={}", emu.audio_rate());
     println!("audio_hash=0x{:016x}", fnv1a_i16(&all_audio));
+    if let Some(path) = compare_audio_path {
+        let reference = read_wav_i16(Path::new(&path))?;
+        let metrics = compare_audio_metrics(&all_audio, emu.audio_rate() as u32, &reference);
+        println!("compare_audio_channels={}", reference.channels);
+        println!("compare_audio_rate={}", reference.sample_rate);
+        println!("compare_audio_ref_pairs={}", wav_first_channel(&reference.samples, reference.channels).len());
+        println!("compare_audio_rmse={:.6}", metrics.rmse);
+        println!("compare_audio_corr={:.9}", metrics.correlation);
+        println!("compare_audio_scale={:.9}", metrics.scale);
+        println!(
+            "compare_audio_first_nonzero_pair={} {}",
+            metrics.first_nonzero_pair,
+            metrics.reference_first_nonzero_pair
+        );
+        println!("compare_audio_peak={} {}", metrics.peak, metrics.reference_peak);
+    }
     for addr in peek_addrs {
         println!("peek32[0x{addr:08x}]=0x{:08x}", emu.peek_u32(addr));
     }
@@ -314,6 +334,158 @@ fn write_wav(path: &Path, samples: &[i16], sample_rate: u32) -> Result<(), Strin
         out.extend_from_slice(&sample.to_le_bytes());
     }
     fs::write(path, out).map_err(|e| format!("failed to write audio dump: {e}"))
+}
+
+struct WavData {
+    sample_rate: u32,
+    channels: u16,
+    samples: Vec<i16>,
+}
+
+struct AudioCompareMetrics {
+    rmse: f64,
+    correlation: f64,
+    scale: f64,
+    first_nonzero_pair: usize,
+    reference_first_nonzero_pair: usize,
+    peak: i32,
+    reference_peak: i32,
+}
+
+fn read_wav_i16(path: &Path) -> Result<WavData, String> {
+    let bytes = fs::read(path).map_err(|e| format!("failed to read wav: {e}"))?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("wav must be RIFF/WAVE".to_string());
+    }
+
+    let mut offset = 12usize;
+    let mut channels = None;
+    let mut sample_rate = None;
+    let mut bits_per_sample = None;
+    let mut audio_format = None;
+    let mut data = None;
+
+    while offset + 8 <= bytes.len() {
+        let chunk_id = &bytes[offset..offset + 4];
+        let chunk_size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+        if offset + chunk_size > bytes.len() {
+            return Err("wav chunk extends past end of file".to_string());
+        }
+        let chunk = &bytes[offset..offset + chunk_size];
+        match chunk_id {
+            b"fmt " => {
+                if chunk.len() < 16 {
+                    return Err("wav fmt chunk is too small".to_string());
+                }
+                audio_format = Some(u16::from_le_bytes(chunk[0..2].try_into().unwrap()));
+                channels = Some(u16::from_le_bytes(chunk[2..4].try_into().unwrap()));
+                sample_rate = Some(u32::from_le_bytes(chunk[4..8].try_into().unwrap()));
+                bits_per_sample = Some(u16::from_le_bytes(chunk[14..16].try_into().unwrap()));
+            }
+            b"data" => data = Some(chunk.to_vec()),
+            _ => {}
+        }
+        offset += chunk_size + (chunk_size & 1);
+    }
+
+    if audio_format != Some(1) {
+        return Err("wav must be PCM".to_string());
+    }
+    let channels = channels.ok_or_else(|| "wav is missing channel count".to_string())?;
+    let sample_rate = sample_rate.ok_or_else(|| "wav is missing sample rate".to_string())?;
+    if bits_per_sample != Some(16) {
+        return Err("wav must use 16-bit samples".to_string());
+    }
+    let data = data.ok_or_else(|| "wav is missing a data chunk".to_string())?;
+    if data.len() % 2 != 0 {
+        return Err("wav data length must be even".to_string());
+    }
+
+    let mut samples = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(2) {
+        samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+
+    Ok(WavData {
+        sample_rate,
+        channels,
+        samples,
+    })
+}
+
+fn compare_audio_metrics(samples: &[i16], sample_rate: u32, reference: &WavData) -> AudioCompareMetrics {
+    let local = wav_first_channel(samples, 2);
+    let reference_channel = wav_first_channel(&reference.samples, reference.channels);
+    let len = local.len().min(reference_channel.len());
+    let local = &local[..len];
+    let reference_channel = &reference_channel[..len];
+
+    let mut sum_sq = 0.0;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xx = 0.0;
+    let mut sum_yy = 0.0;
+    let mut sum_xy = 0.0;
+    let mut peak = 0i32;
+    let mut reference_peak = 0i32;
+    let mut first_nonzero_pair = len;
+    let mut reference_first_nonzero_pair = len;
+
+    for (idx, (&x, &y)) in local.iter().zip(reference_channel.iter()).enumerate() {
+        let xf = f64::from(x);
+        let yf = f64::from(y);
+        let diff = xf - yf;
+        sum_sq += diff * diff;
+        sum_x += xf;
+        sum_y += yf;
+        sum_xx += xf * xf;
+        sum_yy += yf * yf;
+        sum_xy += xf * yf;
+        peak = peak.max(i32::from(x).abs());
+        reference_peak = reference_peak.max(i32::from(y).abs());
+        if x != 0 && first_nonzero_pair == len {
+            first_nonzero_pair = idx;
+        }
+        if y != 0 && reference_first_nonzero_pair == len {
+            reference_first_nonzero_pair = idx;
+        }
+    }
+
+    if reference.sample_rate != sample_rate {
+        eprintln!(
+            "warning: sample rate mismatch (local {} Hz, reference {} Hz)",
+            sample_rate, reference.sample_rate
+        );
+    }
+
+    let rmse = if len == 0 { 0.0 } else { (sum_sq / len as f64).sqrt() };
+    let mean_x = if len == 0 { 0.0 } else { sum_x / len as f64 };
+    let mean_y = if len == 0 { 0.0 } else { sum_y / len as f64 };
+    let cov = sum_xy - len as f64 * mean_x * mean_y;
+    let var_x = sum_xx - len as f64 * mean_x * mean_x;
+    let var_y = sum_yy - len as f64 * mean_y * mean_y;
+    let correlation = if var_x <= 0.0 || var_y <= 0.0 {
+        if local == reference_channel { 1.0 } else { 0.0 }
+    } else {
+        cov / (var_x.sqrt() * var_y.sqrt())
+    };
+    let scale = if sum_xx == 0.0 { 0.0 } else { sum_xy / sum_xx };
+
+    AudioCompareMetrics {
+        rmse,
+        correlation,
+        scale,
+        first_nonzero_pair,
+        reference_first_nonzero_pair,
+        peak,
+        reference_peak,
+    }
+}
+
+fn wav_first_channel(samples: &[i16], channels: u16) -> Vec<i16> {
+    let step = usize::from(channels.max(1));
+    samples.iter().step_by(step).copied().collect()
 }
 
 fn fnv1a_u32(values: &[u32]) -> u64 {
