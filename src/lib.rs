@@ -111,6 +111,7 @@ enum DmaTiming {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AudioCaptureMode {
     Average,
+    Midpoint,
     Endpoint,
     EndpointAfterTimer,
 }
@@ -217,6 +218,10 @@ pub(crate) struct Emulator {
     audio_accum_left: i64,
     audio_accum_right: i64,
     audio_accum_cycles: u32,
+    audio_capture_pair_cycles: u32,
+    audio_capture_midpoint_left: i16,
+    audio_capture_midpoint_right: i16,
+    audio_capture_midpoint_ready: bool,
     audio_delay_pairs: usize,
     audio_delay_line: VecDeque<i32>,
     audio_input_history: i16,
@@ -295,6 +300,10 @@ impl Emulator {
             audio_accum_left: 0,
             audio_accum_right: 0,
             audio_accum_cycles: 0,
+            audio_capture_pair_cycles: 0,
+            audio_capture_midpoint_left: 0,
+            audio_capture_midpoint_right: 0,
+            audio_capture_midpoint_ready: false,
             audio_delay_pairs: AUDIO_OUTPUT_DELAY_PAIRS,
             audio_delay_line: VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1),
             audio_input_history: 0,
@@ -372,6 +381,10 @@ impl Emulator {
         self.audio_accum_left = 0;
         self.audio_accum_right = 0;
         self.audio_accum_cycles = 0;
+        self.audio_capture_pair_cycles = 0;
+        self.audio_capture_midpoint_left = 0;
+        self.audio_capture_midpoint_right = 0;
+        self.audio_capture_midpoint_ready = false;
         self.audio_delay_line.clear();
         self.audio_input_history = 0;
         self.audio_filter_history.fill(0);
