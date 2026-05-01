@@ -76,10 +76,10 @@ const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
 const AUDIO_OUTPUT_DEADZONE: i32 = 0;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
-const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_400;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_320;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_100;
 const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
-const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
+const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 70;
 const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 77;
@@ -1835,7 +1835,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -3_151);
+        assert_eq!(output, -3_158);
     }
 
     #[test]
