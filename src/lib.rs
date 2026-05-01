@@ -69,9 +69,14 @@ const AUDIO_OUTPUT_SCALE: i32 = 64;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
-const AUDIO_OUTPUT_FILTER_TAPS: [i32; 6] = [50, 10, -6, 22, -8, -4];
+const AUDIO_OUTPUT_FILTER_TAPS: [i32; 8] = [49, 11, -3, 18, -15, 3, 7, -6];
 const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
-const AUDIO_OUTPUT_DEADZONE: i32 = 16;
+const AUDIO_OUTPUT_DEADZONE: i32 = 14;
+const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
+const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD: i32 = 2_440;
+const AUDIO_OUTPUT_COMPRESS_NUM: i32 = 124;
+const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -389,7 +394,17 @@ impl Emulator {
         let output = if clamped.abs() <= AUDIO_OUTPUT_DEADZONE {
             0
         } else {
-            clamped as i16
+            let gained = Self::round_divide(clamped * AUDIO_OUTPUT_POST_GAIN_NUM, AUDIO_OUTPUT_POST_GAIN_DEN)
+                .clamp(i16::MIN as i32, i16::MAX as i32);
+            let compressed = if gained.abs() > AUDIO_OUTPUT_COMPRESS_THRESHOLD {
+                let sign = gained.signum();
+                let above = gained.abs() - AUDIO_OUTPUT_COMPRESS_THRESHOLD;
+                sign * (AUDIO_OUTPUT_COMPRESS_THRESHOLD
+                    + Self::round_divide(above * AUDIO_OUTPUT_COMPRESS_NUM, AUDIO_OUTPUT_COMPRESS_DEN))
+            } else {
+                gained
+            };
+            compressed.clamp(i16::MIN as i32, i16::MAX as i32) as i16
         };
         (scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16, output)
     }
@@ -1690,8 +1705,8 @@ mod tests {
             &[1024, 1024, 1024, 1024]
         );
         assert_eq!(
-            &emu.audio_buffer[emu.audio_buffer.len() - 14..],
-            &[800, 800, 960, 960, 864, 864, 1216, 1216, 1088, 1088, 1024, 1024, 1024, 1024]
+            &emu.audio_buffer[emu.audio_buffer.len() - 18..],
+            &[778, 778, 953, 953, 905, 905, 1191, 1191, 953, 953, 1000, 1000, 1111, 1111, 1016, 1016, 1016, 1016]
         );
     }
 
