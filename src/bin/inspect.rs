@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-params \"key=value ...\"] [--audio-capture average|endpoint]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-params \"key=value ...\"] [--audio-capture average|endpoint|endpoint-after-timer] [--audio-mix legacy|stereo-average|left|right] [--sound-dma-threshold n] [--sound-dma-prime fill|single|disabled] [--sound-dma-refill immediate|next-pop]"
                 .to_string()
         })?;
     let frames: u32 = args
@@ -37,6 +37,10 @@ fn run() -> Result<(), String> {
     let mut audio_prefilter_gain_num_override: Option<i32> = None;
     let mut audio_params_override: Option<String> = None;
     let mut audio_capture_mode_override: Option<String> = None;
+    let mut audio_mix_mode_override: Option<String> = None;
+    let mut sound_dma_threshold_override: Option<usize> = None;
+    let mut sound_dma_prime_mode_override: Option<String> = None;
+    let mut sound_dma_refill_mode_override: Option<String> = None;
     let mut trace_frames = false;
     let mut step_count: u64 = 0;
     let mut trace_steps = false;
@@ -96,6 +100,25 @@ fn run() -> Result<(), String> {
                 audio_capture_mode_override =
                     Some(args.next().ok_or_else(|| "missing audio capture mode".to_string())?);
             }
+            "--audio-mix" => {
+                audio_mix_mode_override = Some(args.next().ok_or_else(|| "missing audio mix mode".to_string())?);
+            }
+            "--sound-dma-threshold" => {
+                sound_dma_threshold_override = Some(
+                    args.next()
+                        .ok_or_else(|| "missing sound DMA threshold".to_string())?
+                        .parse()
+                        .map_err(|_| "sound DMA threshold must be an integer".to_string())?,
+                );
+            }
+            "--sound-dma-prime" => {
+                sound_dma_prime_mode_override =
+                    Some(args.next().ok_or_else(|| "missing sound DMA prime mode".to_string())?);
+            }
+            "--sound-dma-refill" => {
+                sound_dma_refill_mode_override =
+                    Some(args.next().ok_or_else(|| "missing sound DMA refill mode".to_string())?);
+            }
             "--trace-frames" => trace_frames = true,
             "--trace-until-steps" => trace_until_steps = true,
             "--step" => {
@@ -152,6 +175,18 @@ fn run() -> Result<(), String> {
     }
     if let Some(mode) = audio_capture_mode_override {
         emu.set_audio_capture_mode_for_debug(&mode)?;
+    }
+    if let Some(mode) = audio_mix_mode_override {
+        emu.set_audio_mix_mode_for_debug(&mode)?;
+    }
+    if let Some(threshold) = sound_dma_threshold_override {
+        emu.set_sound_fifo_dma_threshold_for_debug(threshold);
+    }
+    if let Some(mode) = sound_dma_prime_mode_override {
+        emu.set_sound_fifo_prime_mode_for_debug(&mode)?;
+    }
+    if let Some(mode) = sound_dma_refill_mode_override {
+        emu.set_sound_fifo_refill_mode_for_debug(&mode)?;
     }
     let replay = if let Some(path) = replay_path {
         load_replay(Path::new(&path))?
@@ -317,6 +352,9 @@ fn run() -> Result<(), String> {
         println!("peek32[0x{addr:08x}]=0x{:08x}", emu.peek_u32(addr));
     }
     if trace_sound {
+        println!("sound_dma_threshold={}", emu.sound_fifo_dma_threshold());
+        println!("sound_dma_prime_mode={}", emu.sound_fifo_prime_mode());
+        println!("sound_dma_refill_mode={}", emu.sound_fifo_refill_mode());
         println!("sound_a_sample={}", emu.direct_sound_a_sample());
         println!("sound_b_sample={}", emu.direct_sound_b_sample());
         println!("fifo_a_len={}", emu.fifo_a_len());
