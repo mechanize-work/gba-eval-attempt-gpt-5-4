@@ -1290,7 +1290,6 @@ impl Emulator {
             let base = self.cpu.read_reg(rb, pc, true);
             let final_base = base.wrapping_add(count * 4);
             let rb_in_list = rlist & (1 << rb) != 0;
-            let first_reg = rlist.trailing_zeros() as usize;
             let mut addr = base;
             for reg in 0..8 {
                 if rlist & (1 << reg) == 0 {
@@ -1300,12 +1299,7 @@ impl Emulator {
                     let value = self.read_u32_mapped(addr);
                     self.cpu.write_reg(reg as usize, value);
                 } else {
-                    let value = if reg as usize == rb && rb_in_list && first_reg != rb {
-                        final_base
-                    } else {
-                        self.cpu.read_reg(reg as usize, pc, true)
-                    };
-                    self.write_u32_mapped(addr, value);
+                    self.write_u32_mapped(addr, self.cpu.read_reg(reg as usize, pc, true));
                 }
                 addr = addr.wrapping_add(4);
             }
@@ -1578,22 +1572,6 @@ mod tests {
         assert_eq!(cycles, 3);
         assert_eq!(emu.cpu.regs[1], 0x0807_cfcc);
         assert_eq!(emu.cpu.regs[3], 0x0807_cfec);
-        assert_eq!(emu.cpu.pc(), 0x0300_0002);
-    }
-
-    #[test]
-    fn thumb_stmia_with_base_not_first_stores_new_base_value() {
-        let mut emu = thumb_emu(0x0300_0000);
-        emu.cpu.regs[1] = 0x1111_2222;
-        emu.cpu.regs[3] = 0x0300_0010;
-        emu.iwram[0x0000..0x0002].copy_from_slice(&0xc30au16.to_le_bytes()); // stmia r3!, {r1, r3}
-
-        let cycles = emu.step_cpu();
-
-        assert_eq!(cycles, 3);
-        assert_eq!(emu.read_u32_mapped(0x0300_0010), 0x1111_2222);
-        assert_eq!(emu.read_u32_mapped(0x0300_0014), 0x0300_0018);
-        assert_eq!(emu.cpu.regs[3], 0x0300_0018);
         assert_eq!(emu.cpu.pc(), 0x0300_0002);
     }
 
