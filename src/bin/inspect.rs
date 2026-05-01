@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-capture average|endpoint]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-params \"key=value ...\"] [--audio-capture average|endpoint]"
                 .to_string()
         })?;
     let frames: u32 = args
@@ -35,6 +35,7 @@ fn run() -> Result<(), String> {
     let mut audio_delay_pairs_override: Option<usize> = None;
     let mut audio_first_pair_cycles_override: Option<u32> = None;
     let mut audio_prefilter_gain_num_override: Option<i32> = None;
+    let mut audio_params_override: Option<String> = None;
     let mut audio_capture_mode_override: Option<String> = None;
     let mut trace_frames = false;
     let mut step_count: u64 = 0;
@@ -87,6 +88,9 @@ fn run() -> Result<(), String> {
                         .parse()
                         .map_err(|_| "prefilter gain numerator must be an integer".to_string())?,
                 );
+            }
+            "--audio-params" => {
+                audio_params_override = Some(args.next().ok_or_else(|| "missing audio params".to_string())?);
             }
             "--audio-capture" => {
                 audio_capture_mode_override =
@@ -142,6 +146,9 @@ fn run() -> Result<(), String> {
     }
     if let Some(prefilter_gain_num) = audio_prefilter_gain_num_override {
         emu.set_audio_prefilter_gain_num_for_debug(prefilter_gain_num);
+    }
+    if let Some(audio_params) = audio_params_override {
+        emu.set_audio_params_for_debug(&audio_params)?;
     }
     if let Some(mode) = audio_capture_mode_override {
         emu.set_audio_capture_mode_for_debug(&mode)?;

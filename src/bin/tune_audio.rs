@@ -229,6 +229,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mut max_first_regression = 0.01f64;
+    let mut max_improvements: Option<usize> = None;
     let mut max_peak_overage: Option<i32> = None;
     let mut peak_penalty_weight = 0.0f64;
     let mut require_first_nonzero_match = false;
@@ -248,6 +249,16 @@ fn run() -> Result<(), String> {
                 if max_first_regression < 0.0 {
                     return Err("regression value must be nonnegative".to_string());
                 }
+            }
+            "--max-improvements" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing max improvements value".to_string())?;
+                max_improvements = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "max improvements value must be a nonnegative integer".to_string())?,
+                );
             }
             "--max-peak-overage" => {
                 let value = args
@@ -375,7 +386,7 @@ fn run() -> Result<(), String> {
 
     if positional.len() < 2 || positional.len() % 2 != 0 {
         return Err(
-            "usage: tune_audio [--max-first-regression value] [--max-peak-overage value] [--peak-penalty-weight value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
+            "usage: tune_audio [--max-first-regression value] [--max-improvements count] [--max-peak-overage value] [--peak-penalty-weight value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
                 .to_string(),
         );
     }
@@ -411,6 +422,7 @@ fn run() -> Result<(), String> {
         baseline_params,
         &baseline,
         max_first_regression,
+        max_improvements,
         max_peak_overage,
         peak_penalty_weight,
         require_first_nonzero_match,
@@ -437,6 +449,7 @@ fn search(
     start: AudioOutputParams,
     baseline: &CandidateScore,
     max_first_regression: f64,
+    max_improvements: Option<usize>,
     max_peak_overage: Option<i32>,
     peak_penalty_weight: f64,
     require_first_nonzero_match: bool,
@@ -449,6 +462,7 @@ fn search(
     } else {
         Some((start, baseline.clone()))
     };
+    let mut improvements = 0usize;
 
     loop {
         let mut improved = false;
@@ -508,14 +522,20 @@ fn search(
             {
                 improved = true;
                 best = Some((*round_best_params, round_best_score.clone()));
+                improvements += 1;
                 print_score("improved", *round_best_params, datasets, round_best_score);
             }
             (None, Some((round_best_params, round_best_score))) => {
                 improved = true;
                 best = Some((*round_best_params, round_best_score.clone()));
+                improvements += 1;
                 print_score("improved", *round_best_params, datasets, round_best_score);
             }
             _ => {}
+        }
+
+        if max_improvements.is_some_and(|limit| improvements >= limit) {
+            return best;
         }
 
         if !improved {

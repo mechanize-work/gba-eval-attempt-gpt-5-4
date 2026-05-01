@@ -114,6 +114,53 @@ enum AudioCaptureMode {
     Endpoint,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AudioOutputParams {
+    deadzone: i32,
+    input_filter_cur: i32,
+    input_filter_prev: i32,
+    prefilter_gain_num: i32,
+    compress_threshold_positive: i32,
+    compress_threshold_negative: i32,
+    compress_num_positive: i32,
+    compress_num_negative: i32,
+    positive_bias: i32,
+    negative_bias: i32,
+    post_filter_cur: i32,
+    post_filter_prev: i32,
+    post_filter_prev2: i32,
+    post_filter_positive_bias: i32,
+    post_filter_negative_bias: i32,
+    sign_hysteresis: i32,
+    final_filter_taps: [i32; 4],
+    final_nonzero_bias: i32,
+}
+
+impl Default for AudioOutputParams {
+    fn default() -> Self {
+        Self {
+            deadzone: AUDIO_OUTPUT_DEADZONE,
+            input_filter_cur: AUDIO_OUTPUT_INPUT_FILTER_CUR,
+            input_filter_prev: AUDIO_OUTPUT_INPUT_FILTER_PREV,
+            prefilter_gain_num: AUDIO_OUTPUT_PREFILTER_GAIN_NUM,
+            compress_threshold_positive: AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE,
+            compress_threshold_negative: AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE,
+            compress_num_positive: AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE,
+            compress_num_negative: AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE,
+            positive_bias: AUDIO_OUTPUT_POSITIVE_BIAS,
+            negative_bias: AUDIO_OUTPUT_NEGATIVE_BIAS,
+            post_filter_cur: AUDIO_OUTPUT_POST_FILTER_CUR,
+            post_filter_prev: AUDIO_OUTPUT_POST_FILTER_PREV,
+            post_filter_prev2: AUDIO_OUTPUT_POST_FILTER_PREV2,
+            post_filter_positive_bias: AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS,
+            post_filter_negative_bias: AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS,
+            sign_hysteresis: AUDIO_OUTPUT_SIGN_HYSTERESIS,
+            final_filter_taps: AUDIO_OUTPUT_FINAL_FILTER_TAPS,
+            final_nonzero_bias: AUDIO_OUTPUT_FINAL_NONZERO_BIAS,
+        }
+    }
+}
+
 struct GlobalEmulator(UnsafeCell<Emulator>);
 
 unsafe impl Sync for GlobalEmulator {}
@@ -138,7 +185,7 @@ pub(crate) struct Emulator {
     audio_prefilter_input_buffer: Vec<i16>,
     audio_prefilter_buffer: Vec<i16>,
     audio_capture_mode: AudioCaptureMode,
-    audio_prefilter_gain_num: i32,
+    audio_output_params: AudioOutputParams,
     initial_audio_fraction: u64,
     audio_fraction: u64,
     audio_accum_left: i64,
@@ -205,7 +252,7 @@ impl Emulator {
             audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
             audio_capture_mode: AudioCaptureMode::Average,
-            audio_prefilter_gain_num: AUDIO_OUTPUT_PREFILTER_GAIN_NUM,
+            audio_output_params: AudioOutputParams::default(),
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_accum_left: 0,
@@ -448,6 +495,7 @@ impl Emulator {
     }
 
     fn filter_audio_output(&mut self, sample: i16) -> (i16, i16, i16) {
+        let params = self.audio_output_params;
         self.audio_delay_line.push_back(i32::from(sample));
         let delayed = if self.audio_delay_line.len() > self.audio_delay_pairs {
             self.audio_delay_line.pop_front().unwrap_or(0)
@@ -456,14 +504,13 @@ impl Emulator {
         };
         let prefilter_input = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
         let filtered_input = Self::round_divide(
-            prefilter_input * AUDIO_OUTPUT_INPUT_FILTER_CUR
-                + i32::from(self.audio_input_history) * AUDIO_OUTPUT_INPUT_FILTER_PREV,
+            prefilter_input * params.input_filter_cur
+                + i32::from(self.audio_input_history) * params.input_filter_prev,
             AUDIO_OUTPUT_INPUT_FILTER_DEN,
         )
         .clamp(i16::MIN as i32, i16::MAX as i32);
         self.audio_input_history = prefilter_input.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let scaled =
-            Self::round_divide(filtered_input * self.audio_prefilter_gain_num, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
+        let scaled = Self::round_divide(filtered_input * params.prefilter_gain_num, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
         let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
         for (tap, history) in AUDIO_OUTPUT_FILTER_TAPS[1..].iter().zip(self.audio_filter_history.iter()) {
             accum += *tap * *history;
@@ -473,37 +520,31 @@ impl Emulator {
         self.audio_filter_history.copy_within(0..history_len - 1, 1);
         self.audio_filter_history[0] = scaled;
         let clamped = filtered.clamp(i16::MIN as i32, i16::MAX as i32);
-        let raw_output = if clamped.abs() <= AUDIO_OUTPUT_DEADZONE {
+        let raw_output = if clamped.abs() <= params.deadzone {
             0
         } else {
             let gained = Self::round_divide(clamped * AUDIO_OUTPUT_POST_GAIN_NUM, AUDIO_OUTPUT_POST_GAIN_DEN)
                 .clamp(i16::MIN as i32, i16::MAX as i32);
-            let compressed = if gained > AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE {
-                let above = gained - AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE;
-                AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE
-                    + Self::round_divide(
-                        above * AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE,
-                        AUDIO_OUTPUT_COMPRESS_DEN,
-                    )
-            } else if gained < -AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE {
-                let above = (-gained) - AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE;
-                -(AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE
-                    + Self::round_divide(
-                        above * AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE,
-                        AUDIO_OUTPUT_COMPRESS_DEN,
-                    ))
+            let compressed = if gained > params.compress_threshold_positive {
+                let above = gained - params.compress_threshold_positive;
+                params.compress_threshold_positive
+                    + Self::round_divide(above * params.compress_num_positive, AUDIO_OUTPUT_COMPRESS_DEN)
+            } else if gained < -params.compress_threshold_negative {
+                let above = (-gained) - params.compress_threshold_negative;
+                -(params.compress_threshold_negative
+                    + Self::round_divide(above * params.compress_num_negative, AUDIO_OUTPUT_COMPRESS_DEN))
             } else {
                 gained
             };
             let biased = if compressed > 0 {
-                compressed + AUDIO_OUTPUT_POSITIVE_BIAS
+                compressed + params.positive_bias
             } else {
-                compressed + AUDIO_OUTPUT_NEGATIVE_BIAS
+                compressed + params.negative_bias
             };
             let post_filtered = Self::round_divide(
-                biased * AUDIO_OUTPUT_POST_FILTER_CUR
-                    + i32::from(self.audio_post_history) * AUDIO_OUTPUT_POST_FILTER_PREV
-                    + i32::from(self.audio_post_history2) * AUDIO_OUTPUT_POST_FILTER_PREV2,
+                biased * params.post_filter_cur
+                    + i32::from(self.audio_post_history) * params.post_filter_prev
+                    + i32::from(self.audio_post_history2) * params.post_filter_prev2,
                 AUDIO_OUTPUT_POST_FILTER_DEN,
             )
             .clamp(i16::MIN as i32, i16::MAX as i32);
@@ -512,16 +553,16 @@ impl Emulator {
             let mut output = if post_filtered == 0 {
                 0
             } else if post_filtered > 0 {
-                (post_filtered + AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS)
+                (post_filtered + params.post_filter_positive_bias)
                     .clamp(i16::MIN as i32, i16::MAX as i32) as i16
             } else {
-                (post_filtered + AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS)
+                (post_filtered + params.post_filter_negative_bias)
                     .clamp(i16::MIN as i32, i16::MAX as i32) as i16
             };
             if self.audio_last_nonzero_output != 0
                 && output != 0
                 && (self.audio_last_nonzero_output > 0) != (output > 0)
-                && i32::from(output).abs() <= AUDIO_OUTPUT_SIGN_HYSTERESIS
+                && i32::from(output).abs() <= params.sign_hysteresis
             {
                 output = 0;
             }
@@ -530,11 +571,8 @@ impl Emulator {
             }
             output
         };
-        let mut final_accum = AUDIO_OUTPUT_FINAL_FILTER_TAPS[0] * i32::from(raw_output);
-        for (tap, history) in AUDIO_OUTPUT_FINAL_FILTER_TAPS[1..]
-            .iter()
-            .zip(self.audio_final_filter_history.iter())
-        {
+        let mut final_accum = params.final_filter_taps[0] * i32::from(raw_output);
+        for (tap, history) in params.final_filter_taps[1..].iter().zip(self.audio_final_filter_history.iter()) {
             final_accum += *tap * i32::from(*history);
         }
         let corrected_output =
@@ -543,7 +581,7 @@ impl Emulator {
         let corrected_output = if corrected_output == 0 {
             0
         } else {
-            (i32::from(corrected_output) + AUDIO_OUTPUT_FINAL_NONZERO_BIAS)
+            (i32::from(corrected_output) + params.final_nonzero_bias)
                 .clamp(i16::MIN as i32, i16::MAX as i32) as i16
         };
         let final_history_len = self.audio_final_filter_history.len();
@@ -555,6 +593,71 @@ impl Emulator {
             scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
             corrected_output,
         )
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn reset_audio_output_history_for_debug(&mut self) {
+        self.audio_buffer.clear();
+        self.audio_pair_input_buffer.clear();
+        self.audio_prefilter_input_buffer.clear();
+        self.audio_prefilter_buffer.clear();
+        self.audio_accum_left = 0;
+        self.audio_accum_right = 0;
+        self.audio_accum_cycles = 0;
+        self.audio_delay_line.clear();
+        self.audio_input_history = 0;
+        self.audio_filter_history = [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1];
+        self.audio_post_history = 0;
+        self.audio_post_history2 = 0;
+        self.audio_last_nonzero_output = 0;
+        self.audio_final_filter_history = [0; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1];
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn set_audio_params_for_debug(&mut self, spec: &str) -> Result<(), String> {
+        let mut params = self.audio_output_params;
+        for token in spec.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let Some((key, value_text)) = token.split_once('=') else {
+                continue;
+            };
+            if matches!(key, "total_rmse" | "objective_total" | "total_peak_overage") {
+                continue;
+            }
+            let value = value_text
+                .parse::<i32>()
+                .map_err(|_| format!("invalid audio param value for {key}: {value_text}"))?;
+            match key {
+                "dead" => params.deadzone = value.max(0),
+                "icur" => params.input_filter_cur = value.clamp(120, 136),
+                "iprev" => params.input_filter_prev = value.clamp(-16, 16),
+                "pregain" => params.prefilter_gain_num = value.clamp(120, 136),
+                "pthr" => params.compress_threshold_positive = value.max(0),
+                "nthr" => params.compress_threshold_negative = value.max(0),
+                "pcnum" => params.compress_num_positive = value.clamp(120, 128),
+                "ncnum" => params.compress_num_negative = value.clamp(120, 128),
+                "pos_bias" => params.positive_bias = value,
+                "neg_bias" => params.negative_bias = value,
+                "cur" => params.post_filter_cur = value.clamp(120, 136),
+                "prev" => params.post_filter_prev = value.clamp(-8, 8),
+                "prev2" => params.post_filter_prev2 = value.clamp(-8, 8),
+                "post_pos_bias" => params.post_filter_positive_bias = value,
+                "post_neg_bias" => params.post_filter_negative_bias = value,
+                "sign_hyst" => params.sign_hysteresis = value.max(0),
+                "fcur" => params.final_filter_taps[0] = value.clamp(120, 128),
+                "fprev" => params.final_filter_taps[1] = value.clamp(0, 16),
+                "fprev2" => params.final_filter_taps[2] = value.clamp(-8, 4),
+                "fprev3" => params.final_filter_taps[3] = value.clamp(-8, 4),
+                "fnonzero" => params.final_nonzero_bias = value,
+                _ => return Err(format!("unknown audio param key: {key}")),
+            }
+        }
+        self.audio_output_params = params;
+        self.reset_audio_output_history_for_debug();
+        Ok(())
     }
 
     fn round_divide(value: i32, denominator: i32) -> i32 {
@@ -1510,7 +1613,7 @@ impl NativeEmulator {
 
     pub fn set_audio_delay_pairs_for_debug(&mut self, delay_pairs: usize) {
         self.inner.audio_delay_pairs = delay_pairs.max(1);
-        self.inner.audio_delay_line.clear();
+        self.inner.reset_audio_output_history_for_debug();
     }
 
     pub fn set_audio_first_pair_cycles_for_debug(&mut self, cycles: u32) {
@@ -1520,9 +1623,7 @@ impl NativeEmulator {
         let initial_fraction = CPU_CLOCK_HZ as u64 - rate * clamped_cycles as u64;
         self.inner.initial_audio_fraction = initial_fraction;
         self.inner.audio_fraction = initial_fraction;
-        self.inner.audio_accum_left = 0;
-        self.inner.audio_accum_right = 0;
-        self.inner.audio_accum_cycles = 0;
+        self.inner.reset_audio_output_history_for_debug();
     }
 
     pub fn set_audio_capture_mode_for_debug(&mut self, mode: &str) -> Result<(), String> {
@@ -1535,14 +1636,17 @@ impl NativeEmulator {
                 ))
             }
         };
-        self.inner.audio_accum_left = 0;
-        self.inner.audio_accum_right = 0;
-        self.inner.audio_accum_cycles = 0;
+        self.inner.reset_audio_output_history_for_debug();
         Ok(())
     }
 
     pub fn set_audio_prefilter_gain_num_for_debug(&mut self, gain_num: i32) {
-        self.inner.audio_prefilter_gain_num = gain_num.clamp(120, 136);
+        self.inner.audio_output_params.prefilter_gain_num = gain_num.clamp(120, 136);
+        self.inner.reset_audio_output_history_for_debug();
+    }
+
+    pub fn set_audio_params_for_debug(&mut self, spec: &str) -> Result<(), String> {
+        self.inner.set_audio_params_for_debug(spec)
     }
 
     pub fn set_keys(&mut self, keys: u32) {
@@ -1945,6 +2049,67 @@ mod tests {
 
         assert_eq!(prefilter, -4_482);
         assert_eq!(output, -3_504);
+    }
+
+    #[test]
+    fn audio_debug_params_accept_tune_audio_output_lines() {
+        let mut emu = Emulator::new();
+        emu.audio_buffer.extend_from_slice(&[1, 2]);
+        emu.audio_pair_input_buffer.extend_from_slice(&[3, 4]);
+        emu.audio_prefilter_input_buffer.extend_from_slice(&[5, 6]);
+        emu.audio_prefilter_buffer.extend_from_slice(&[7, 8]);
+        emu.audio_accum_left = 9;
+        emu.audio_accum_right = 10;
+        emu.audio_accum_cycles = 11;
+        emu.audio_delay_line.extend([12, 13]);
+        emu.audio_input_history = 14;
+        emu.audio_filter_history[0] = 15;
+        emu.audio_post_history = 16;
+        emu.audio_post_history2 = 17;
+        emu.audio_last_nonzero_output = 18;
+        emu.audio_final_filter_history[0] = 19;
+
+        emu.set_audio_params_for_debug(
+            "improved dead=0 icur=136 iprev=-16 pregain=136 pthr=2400 nthr=2340 pcnum=126 ncnum=124 pos_bias=67 neg_bias=75 cur=136 prev=-8 prev2=6 post_pos_bias=5 post_neg_bias=-7 sign_hyst=28 fcur=126 fprev=0 fprev2=4 fprev3=-8 fnonzero=2 total_rmse=246.133884 objective_total=246.678884 total_peak_overage=109",
+        )
+        .expect("params should parse");
+
+        assert_eq!(emu.audio_output_params.deadzone, 0);
+        assert_eq!(emu.audio_output_params.input_filter_cur, 136);
+        assert_eq!(emu.audio_output_params.input_filter_prev, -16);
+        assert_eq!(emu.audio_output_params.prefilter_gain_num, 136);
+        assert_eq!(emu.audio_output_params.compress_threshold_positive, 2_400);
+        assert_eq!(emu.audio_output_params.compress_threshold_negative, 2_340);
+        assert_eq!(emu.audio_output_params.compress_num_positive, 126);
+        assert_eq!(emu.audio_output_params.compress_num_negative, 124);
+        assert_eq!(emu.audio_output_params.positive_bias, 67);
+        assert_eq!(emu.audio_output_params.negative_bias, 75);
+        assert_eq!(emu.audio_output_params.post_filter_cur, 136);
+        assert_eq!(emu.audio_output_params.post_filter_prev, -8);
+        assert_eq!(emu.audio_output_params.post_filter_prev2, 6);
+        assert_eq!(emu.audio_output_params.post_filter_positive_bias, 5);
+        assert_eq!(emu.audio_output_params.post_filter_negative_bias, -7);
+        assert_eq!(emu.audio_output_params.sign_hysteresis, 28);
+        assert_eq!(emu.audio_output_params.final_filter_taps, [126, 0, 4, -8]);
+        assert_eq!(emu.audio_output_params.final_nonzero_bias, 2);
+
+        assert!(emu.audio_buffer.is_empty());
+        assert!(emu.audio_pair_input_buffer.is_empty());
+        assert!(emu.audio_prefilter_input_buffer.is_empty());
+        assert!(emu.audio_prefilter_buffer.is_empty());
+        assert_eq!(emu.audio_accum_left, 0);
+        assert_eq!(emu.audio_accum_right, 0);
+        assert_eq!(emu.audio_accum_cycles, 0);
+        assert!(emu.audio_delay_line.is_empty());
+        assert_eq!(emu.audio_input_history, 0);
+        assert_eq!(emu.audio_filter_history, [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1]);
+        assert_eq!(emu.audio_post_history, 0);
+        assert_eq!(emu.audio_post_history2, 0);
+        assert_eq!(emu.audio_last_nonzero_output, 0);
+        assert_eq!(
+            emu.audio_final_filter_history,
+            [0; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1]
+        );
     }
 
     #[test]
