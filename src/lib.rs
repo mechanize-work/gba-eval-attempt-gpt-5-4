@@ -74,18 +74,20 @@ const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
 const AUDIO_OUTPUT_DEADZONE: i32 = 5;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
-const AUDIO_OUTPUT_COMPRESS_THRESHOLD: i32 = 2_380;
-const AUDIO_OUTPUT_COMPRESS_NUM: i32 = 127;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_400;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_320;
+const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 127;
+const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 74;
 const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 76;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 129;
-const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = 0;
-const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -1;
+const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = 1;
+const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -2;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = -1;
 const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -10;
-const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 24;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 26;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -414,11 +416,20 @@ impl Emulator {
         } else {
             let gained = Self::round_divide(clamped * AUDIO_OUTPUT_POST_GAIN_NUM, AUDIO_OUTPUT_POST_GAIN_DEN)
                 .clamp(i16::MIN as i32, i16::MAX as i32);
-            let compressed = if gained.abs() > AUDIO_OUTPUT_COMPRESS_THRESHOLD {
-                let sign = gained.signum();
-                let above = gained.abs() - AUDIO_OUTPUT_COMPRESS_THRESHOLD;
-                sign * (AUDIO_OUTPUT_COMPRESS_THRESHOLD
-                    + Self::round_divide(above * AUDIO_OUTPUT_COMPRESS_NUM, AUDIO_OUTPUT_COMPRESS_DEN))
+            let compressed = if gained > AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE {
+                let above = gained - AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE;
+                AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE
+                    + Self::round_divide(
+                        above * AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE,
+                        AUDIO_OUTPUT_COMPRESS_DEN,
+                    )
+            } else if gained < -AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE {
+                let above = (-gained) - AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE;
+                -(AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE
+                    + Self::round_divide(
+                        above * AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE,
+                        AUDIO_OUTPUT_COMPRESS_DEN,
+                    ))
             } else {
                 gained
             };
@@ -1757,7 +1768,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[858, 858, 1034, 1034, 979, 979, 1266, 1266, 1026, 1026, 1072, 1072, 1185, 1185, 1089, 1089, 1088, 1088]
+            &[858, 858, 1041, 1041, 980, 980, 1265, 1265, 1029, 1029, 1070, 1070, 1186, 1186, 1090, 1090, 1088, 1088]
         );
     }
 
@@ -1782,7 +1793,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -2_991);
+        assert_eq!(output, -2_990);
     }
 
     #[test]

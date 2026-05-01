@@ -19,8 +19,10 @@ const SEARCH_HYST_DELTAS: [i32; 9] = [-16, -8, -4, -2, 0, 2, 4, 8, 16];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AudioOutputParams {
     deadzone: i32,
-    compress_threshold: i32,
-    compress_num: i32,
+    compress_threshold_positive: i32,
+    compress_threshold_negative: i32,
+    compress_num_positive: i32,
+    compress_num_negative: i32,
     positive_bias: i32,
     negative_bias: i32,
     post_filter_cur: i32,
@@ -36,16 +38,18 @@ impl Default for AudioOutputParams {
         // Keep these in sync with the late-stage audio constants in `src/lib.rs`.
         Self {
             deadzone: 5,
-            compress_threshold: 2_380,
-            compress_num: 127,
+            compress_threshold_positive: 2_400,
+            compress_threshold_negative: 2_320,
+            compress_num_positive: 127,
+            compress_num_negative: 127,
             positive_bias: 74,
             negative_bias: 76,
             post_filter_cur: 129,
-            post_filter_prev: 0,
-            post_filter_prev2: -1,
+            post_filter_prev: 1,
+            post_filter_prev2: -2,
             post_filter_positive_bias: -1,
             post_filter_negative_bias: -10,
-            sign_hysteresis: 24,
+            sign_hysteresis: 26,
         }
     }
 }
@@ -68,8 +72,10 @@ struct CandidateScore {
 #[derive(Clone, Copy)]
 enum ParamKind {
     Deadzone,
-    CompressThreshold,
-    CompressNum,
+    CompressThresholdPositive,
+    CompressThresholdNegative,
+    CompressNumPositive,
+    CompressNumNegative,
     PositiveBias,
     NegativeBias,
     PostFilterCur,
@@ -81,10 +87,12 @@ enum ParamKind {
 }
 
 impl ParamKind {
-    const ALL: [ParamKind; 11] = [
+    const ALL: [ParamKind; 13] = [
         ParamKind::Deadzone,
-        ParamKind::CompressThreshold,
-        ParamKind::CompressNum,
+        ParamKind::CompressThresholdPositive,
+        ParamKind::CompressThresholdNegative,
+        ParamKind::CompressNumPositive,
+        ParamKind::CompressNumNegative,
         ParamKind::PositiveBias,
         ParamKind::NegativeBias,
         ParamKind::PostFilterCur,
@@ -98,8 +106,8 @@ impl ParamKind {
     fn deltas(self) -> &'static [i32] {
         match self {
             ParamKind::Deadzone => &SEARCH_DEAD_DELTAS,
-            ParamKind::CompressThreshold => &SEARCH_THR_DELTAS,
-            ParamKind::CompressNum => &SEARCH_CNUM_DELTAS,
+            ParamKind::CompressThresholdPositive | ParamKind::CompressThresholdNegative => &SEARCH_THR_DELTAS,
+            ParamKind::CompressNumPositive | ParamKind::CompressNumNegative => &SEARCH_CNUM_DELTAS,
             ParamKind::PositiveBias | ParamKind::NegativeBias => &SEARCH_BIAS_DELTAS,
             ParamKind::SignHysteresis => &SEARCH_HYST_DELTAS,
             ParamKind::PostFilterCur
@@ -115,10 +123,22 @@ impl ParamKind {
     fn apply(self, params: &mut AudioOutputParams, delta: i32) {
         match self {
             ParamKind::Deadzone => params.deadzone = (params.deadzone + delta).max(0),
-            ParamKind::CompressThreshold => {
-                params.compress_threshold = (params.compress_threshold + delta).max(0)
+            ParamKind::CompressThresholdPositive => {
+                params.compress_threshold_positive =
+                    (params.compress_threshold_positive + delta).max(0)
             }
-            ParamKind::CompressNum => params.compress_num = (params.compress_num + delta).clamp(120, 128),
+            ParamKind::CompressThresholdNegative => {
+                params.compress_threshold_negative =
+                    (params.compress_threshold_negative + delta).max(0)
+            }
+            ParamKind::CompressNumPositive => {
+                params.compress_num_positive =
+                    (params.compress_num_positive + delta).clamp(120, 128)
+            }
+            ParamKind::CompressNumNegative => {
+                params.compress_num_negative =
+                    (params.compress_num_negative + delta).clamp(120, 128)
+            }
             ParamKind::PositiveBias => params.positive_bias += delta,
             ParamKind::NegativeBias => params.negative_bias += delta,
             ParamKind::PostFilterCur => params.post_filter_cur = (params.post_filter_cur + delta).clamp(120, 136),
@@ -163,12 +183,32 @@ fn run() -> Result<(), String> {
                 start_params.deadzone = parse_i32_arg(args.next(), "missing deadzone value")?.max(0);
             }
             "--start-threshold" => {
-                start_params.compress_threshold =
+                start_params.compress_threshold_positive =
                     parse_i32_arg(args.next(), "missing threshold value")?.max(0);
+                start_params.compress_threshold_negative = start_params.compress_threshold_positive;
+            }
+            "--start-positive-threshold" => {
+                start_params.compress_threshold_positive =
+                    parse_i32_arg(args.next(), "missing positive threshold value")?.max(0);
+            }
+            "--start-negative-threshold" => {
+                start_params.compress_threshold_negative =
+                    parse_i32_arg(args.next(), "missing negative threshold value")?.max(0);
             }
             "--start-compress-num" => {
-                start_params.compress_num =
+                start_params.compress_num_positive =
                     parse_i32_arg(args.next(), "missing compress numerator value")?.clamp(120, 128);
+                start_params.compress_num_negative = start_params.compress_num_positive;
+            }
+            "--start-positive-compress-num" => {
+                start_params.compress_num_positive =
+                    parse_i32_arg(args.next(), "missing positive compress numerator value")?
+                        .clamp(120, 128);
+            }
+            "--start-negative-compress-num" => {
+                start_params.compress_num_negative =
+                    parse_i32_arg(args.next(), "missing negative compress numerator value")?
+                        .clamp(120, 128);
             }
             "--start-positive-bias" => {
                 start_params.positive_bias =
@@ -452,11 +492,14 @@ fn filter_audio_sample(
 
     let gained = round_divide(clamped * AUDIO_OUTPUT_POST_GAIN_NUM, AUDIO_OUTPUT_POST_GAIN_DEN)
         .clamp(i16::MIN as i32, i16::MAX as i32);
-    let compressed = if gained.abs() > params.compress_threshold {
-        let sign = gained.signum();
-        let above = gained.abs() - params.compress_threshold;
-        sign * (params.compress_threshold
-            + round_divide(above * params.compress_num, AUDIO_OUTPUT_COMPRESS_DEN))
+    let compressed = if gained > params.compress_threshold_positive {
+        let above = gained - params.compress_threshold_positive;
+        params.compress_threshold_positive
+            + round_divide(above * params.compress_num_positive, AUDIO_OUTPUT_COMPRESS_DEN)
+    } else if gained < -params.compress_threshold_negative {
+        let above = (-gained) - params.compress_threshold_negative;
+        -(params.compress_threshold_negative
+            + round_divide(above * params.compress_num_negative, AUDIO_OUTPUT_COMPRESS_DEN))
     } else {
         gained
     };
@@ -498,10 +541,12 @@ fn filter_audio_sample(
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} thr={} cnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} total_rmse={:.6}",
+        "{label} dead={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} total_rmse={:.6}",
         params.deadzone,
-        params.compress_threshold,
-        params.compress_num,
+        params.compress_threshold_positive,
+        params.compress_threshold_negative,
+        params.compress_num_positive,
+        params.compress_num_negative,
         params.positive_bias,
         params.negative_bias,
         params.post_filter_cur,
