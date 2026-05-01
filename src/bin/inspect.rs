@@ -355,6 +355,12 @@ fn run() -> Result<(), String> {
         println!("sound_dma_threshold={}", emu.sound_fifo_dma_threshold());
         println!("sound_dma_prime_mode={}", emu.sound_fifo_prime_mode());
         println!("sound_dma_refill_mode={}", emu.sound_fifo_refill_mode());
+        println!("timer_overflow_total={:?}", emu.timer_overflow_total());
+        println!("timer_overflow_max_batch={:?}", emu.timer_overflow_max_batch());
+        println!("sound_pop_count={:?}", emu.sound_pop_count());
+        println!("sound_dma_request_count={:?}", emu.sound_dma_request_count());
+        println!("sound_dma_service_count={:?}", emu.sound_dma_service_count());
+        println!("sound_dma_transfer_bytes={:?}", emu.sound_dma_transfer_bytes());
         println!("sound_a_sample={}", emu.direct_sound_a_sample());
         println!("sound_b_sample={}", emu.direct_sound_b_sample());
         println!("fifo_a_len={}", emu.fifo_a_len());

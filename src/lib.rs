@@ -257,6 +257,12 @@ pub(crate) struct Emulator {
     debug_sound_b_pops: Vec<i8>,
     debug_sound_a_cpu_writes: Vec<i8>,
     debug_sound_b_cpu_writes: Vec<i8>,
+    debug_timer_overflow_total: [u64; 4],
+    debug_timer_overflow_max_batch: [u32; 4],
+    debug_sound_pop_count: [u64; 2],
+    debug_sound_dma_request_count: [u64; 2],
+    debug_sound_dma_service_count: [u64; 2],
+    debug_sound_dma_transfer_bytes: [u64; 2],
 }
 
 impl Emulator {
@@ -329,6 +335,12 @@ impl Emulator {
             debug_sound_b_pops: Vec::with_capacity(64),
             debug_sound_a_cpu_writes: Vec::with_capacity(16),
             debug_sound_b_cpu_writes: Vec::with_capacity(16),
+            debug_timer_overflow_total: [0; 4],
+            debug_timer_overflow_max_batch: [0; 4],
+            debug_sound_pop_count: [0; 2],
+            debug_sound_dma_request_count: [0; 2],
+            debug_sound_dma_service_count: [0; 2],
+            debug_sound_dma_transfer_bytes: [0; 2],
         };
         emu.reset_runtime_state();
         emu
@@ -396,6 +408,12 @@ impl Emulator {
         self.debug_sound_b_pops.clear();
         self.debug_sound_a_cpu_writes.clear();
         self.debug_sound_b_cpu_writes.clear();
+        self.debug_timer_overflow_total = [0; 4];
+        self.debug_timer_overflow_max_batch = [0; 4];
+        self.debug_sound_pop_count = [0; 2];
+        self.debug_sound_dma_request_count = [0; 2];
+        self.debug_sound_dma_service_count = [0; 2];
+        self.debug_sound_dma_transfer_bytes = [0; 2];
         self.cpu.reset();
 
         self.io_write_u16_raw(REG_DISPCNT, 0x0080);
@@ -978,6 +996,7 @@ impl Emulator {
             self.direct_sound_b_sample = sample;
             Self::push_debug_sample(&mut self.debug_sound_b_pops, sample);
         }
+        self.debug_sound_pop_count[channel] = self.debug_sound_pop_count[channel].wrapping_add(1);
     }
 
     fn push_debug_sample(debug: &mut Vec<i8>, sample: i8) {
@@ -988,7 +1007,14 @@ impl Emulator {
     }
 
     fn handle_timer_overflow(&mut self, timer: usize, overflows: u32) {
-        if overflows == 0 || self.io[REG_SOUNDCNT_X] & 0x80 == 0 {
+        if overflows == 0 {
+            return;
+        }
+        self.debug_timer_overflow_total[timer] =
+            self.debug_timer_overflow_total[timer].wrapping_add(overflows as u64);
+        self.debug_timer_overflow_max_batch[timer] =
+            self.debug_timer_overflow_max_batch[timer].max(overflows);
+        if self.io[REG_SOUNDCNT_X] & 0x80 == 0 {
             return;
         }
         let soundcnt_h = self.io_read_u16_raw(REG_SOUNDCNT_H);
@@ -1491,6 +1517,15 @@ impl Emulator {
     }
 
     fn run_dma_sound_request(&mut self, fifo_addr: u32) {
+        let sound_channel = match fifo_addr {
+            0x0400_00a0 => Some(0),
+            0x0400_00a4 => Some(1),
+            _ => None,
+        };
+        if let Some(sound_channel) = sound_channel {
+            self.debug_sound_dma_request_count[sound_channel] =
+                self.debug_sound_dma_request_count[sound_channel].wrapping_add(1);
+        }
         for channel in 1..=2 {
             let base = DMA_REG_BASES[channel];
             let control = self.io_read_u16_raw(base + 0x0a);
@@ -1500,7 +1535,26 @@ impl Emulator {
             if self.io_read_u32_raw(base + 0x04) != fifo_addr {
                 continue;
             }
+            let before_len = sound_channel.map(|sound_channel| {
+                if sound_channel == 0 {
+                    self.fifo_a.len()
+                } else {
+                    self.fifo_b.len()
+                }
+            });
             self.run_dma_channel_inner(channel, true);
+            if let (Some(sound_channel), Some(before_len)) = (sound_channel, before_len) {
+                let after_len = if sound_channel == 0 {
+                    self.fifo_a.len()
+                } else {
+                    self.fifo_b.len()
+                };
+                self.debug_sound_dma_service_count[sound_channel] =
+                    self.debug_sound_dma_service_count[sound_channel].wrapping_add(1);
+                self.debug_sound_dma_transfer_bytes[sound_channel] =
+                    self.debug_sound_dma_transfer_bytes[sound_channel]
+                        .wrapping_add(after_len.saturating_sub(before_len) as u64);
+            }
         }
     }
 
@@ -2040,6 +2094,30 @@ impl NativeEmulator {
         }
     }
 
+    pub fn timer_overflow_total(&self) -> [u64; 4] {
+        self.inner.debug_timer_overflow_total
+    }
+
+    pub fn timer_overflow_max_batch(&self) -> [u32; 4] {
+        self.inner.debug_timer_overflow_max_batch
+    }
+
+    pub fn sound_pop_count(&self) -> [u64; 2] {
+        self.inner.debug_sound_pop_count
+    }
+
+    pub fn sound_dma_request_count(&self) -> [u64; 2] {
+        self.inner.debug_sound_dma_request_count
+    }
+
+    pub fn sound_dma_service_count(&self) -> [u64; 2] {
+        self.inner.debug_sound_dma_service_count
+    }
+
+    pub fn sound_dma_transfer_bytes(&self) -> [u64; 2] {
+        self.inner.debug_sound_dma_transfer_bytes
+    }
+
     pub fn debug_sound_a_writes(&self) -> &[i8] {
         &self.inner.debug_sound_a_writes
     }
@@ -2213,7 +2291,7 @@ mod tests {
     fn sound_fifo_dma_refills_on_timer_overflow() {
         let mut emu = Emulator::new();
 
-        emu.write_io_u16(REG_SOUNDCNT_H, 0x030c);
+        emu.write_io_u16(REG_SOUNDCNT_H, 0x430c);
         emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
         emu.write_io_u8(REG_FIFO_A, 0x7f);
 
@@ -2257,12 +2335,20 @@ mod tests {
         assert_eq!(threshold_16.direct_sound_a_sample, 1);
         assert_eq!(threshold_16.fifo_a.len(), DIRECT_SOUND_FIFO_CAPACITY);
         assert_eq!(threshold_16.fifo_a.front().copied(), Some(2));
+        assert_eq!(threshold_16.debug_sound_pop_count, [1, 0]);
+        assert_eq!(threshold_16.debug_sound_dma_request_count, [1, 0]);
+        assert_eq!(threshold_16.debug_sound_dma_service_count, [1, 0]);
+        assert_eq!(threshold_16.debug_sound_dma_transfer_bytes, [16, 0]);
 
         let mut threshold_15 = setup(15);
         threshold_15.clock_direct_sound_channel(0);
         assert_eq!(threshold_15.direct_sound_a_sample, 1);
         assert_eq!(threshold_15.fifo_a.len(), 16);
         assert_eq!(threshold_15.fifo_a.front().copied(), Some(2));
+        assert_eq!(threshold_15.debug_sound_pop_count, [1, 0]);
+        assert_eq!(threshold_15.debug_sound_dma_request_count, [0, 0]);
+        assert_eq!(threshold_15.debug_sound_dma_service_count, [0, 0]);
+        assert_eq!(threshold_15.debug_sound_dma_transfer_bytes, [0, 0]);
     }
 
     #[test]
@@ -2322,6 +2408,29 @@ mod tests {
         assert_eq!(next_pop.direct_sound_a_sample, 2);
         assert_eq!(next_pop.fifo_a.len(), 31);
         assert!(!next_pop.sound_fifo_refill_pending[0]);
+    }
+
+    #[test]
+    fn timer_overflow_debug_counters_track_batches_and_sound_pops() {
+        let mut emu = Emulator::new();
+
+        emu.handle_timer_overflow(2, 5);
+        assert_eq!(emu.debug_timer_overflow_total, [0, 0, 5, 0]);
+        assert_eq!(emu.debug_timer_overflow_max_batch, [0, 0, 5, 0]);
+        assert_eq!(emu.debug_sound_pop_count, [0, 0]);
+
+        emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        emu.write_io_u16(REG_SOUNDCNT_H, 0x430c);
+        emu.fifo_a.extend([11, 22, 33]);
+
+        emu.handle_timer_overflow(0, 2);
+        emu.handle_timer_overflow(0, 1);
+
+        assert_eq!(emu.debug_timer_overflow_total, [3, 0, 5, 0]);
+        assert_eq!(emu.debug_timer_overflow_max_batch, [2, 0, 5, 0]);
+        assert_eq!(emu.debug_sound_pop_count, [3, 0]);
+        assert_eq!(emu.direct_sound_a_sample, 33);
+        assert_eq!(emu.debug_sound_a_pops, [11, 22, 33]);
     }
 
     #[test]
