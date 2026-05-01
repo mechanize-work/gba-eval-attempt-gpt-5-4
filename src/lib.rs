@@ -24,7 +24,7 @@ const CPU_CLOCK_HZ: u32 = 16_777_216;
 const DEFAULT_AUDIO_RATE: u32 = 32_768;
 const DOUBLE_AUDIO_RATE: u32 = 65_536;
 const BOOT_AUDIO_PREROLL_PAIRS: usize = 1_500;
-const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 320;
+const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 296;
 const INITIAL_AUDIO_FRACTION: u64 =
     CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * INITIAL_AUDIO_FIRST_PAIR_CYCLES as u64;
 
@@ -87,9 +87,9 @@ const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 136;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -8;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 1;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 2;
+const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 3;
 const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -11;
-const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 22;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 26;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 2, 4, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
@@ -1810,7 +1810,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[903, 903, 1050, 1050, 1025, 1025, 1280, 1280, 1004, 1004, 1080, 1080, 1166, 1166, 1079, 1079, 1084, 1084]
+            &[904, 904, 1051, 1051, 1026, 1026, 1281, 1281, 1005, 1005, 1081, 1081, 1167, 1167, 1080, 1080, 1085, 1085]
         );
     }
 
@@ -1823,7 +1823,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_000);
-        assert_eq!(output, 3_305);
+        assert_eq!(output, 3_306);
     }
 
     #[test]
