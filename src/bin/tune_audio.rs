@@ -62,20 +62,20 @@ impl Default for AudioOutputParams {
             compress_threshold_positive: 2_400,
             compress_threshold_negative: 2_100,
             compress_num_positive: 128,
-            compress_num_negative: 126,
-            positive_bias: 67,
-            negative_bias: 75,
+            compress_num_negative: 127,
+            positive_bias: 66,
+            negative_bias: 71,
             post_filter_cur: 136,
             post_filter_prev: -8,
             post_filter_prev2: 6,
             post_filter_positive_bias: 5,
-            post_filter_negative_bias: -7,
+            post_filter_negative_bias: -3,
             sign_hysteresis: 28,
             final_filter_cur: 126,
             final_filter_prev: 0,
             final_filter_prev2: 4,
             final_filter_prev3: -8,
-            final_nonzero_bias: 2,
+            final_nonzero_bias: 3,
         }
     }
 }
@@ -99,7 +99,7 @@ struct CandidateScore {
     peaks: Vec<i32>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ParamKind {
     Deadzone,
     InputFilterCur,
@@ -148,6 +148,33 @@ impl ParamKind {
         ParamKind::FinalFilterPrev3,
         ParamKind::FinalNonzeroBias,
     ];
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "dead" => ParamKind::Deadzone,
+            "icur" => ParamKind::InputFilterCur,
+            "iprev" => ParamKind::InputFilterPrev,
+            "pregain" => ParamKind::PrefilterGainNum,
+            "pthr" => ParamKind::CompressThresholdPositive,
+            "nthr" => ParamKind::CompressThresholdNegative,
+            "pcnum" => ParamKind::CompressNumPositive,
+            "ncnum" => ParamKind::CompressNumNegative,
+            "pos_bias" => ParamKind::PositiveBias,
+            "neg_bias" => ParamKind::NegativeBias,
+            "cur" => ParamKind::PostFilterCur,
+            "prev" => ParamKind::PostFilterPrev,
+            "prev2" => ParamKind::PostFilterPrev2,
+            "post_pos_bias" => ParamKind::PostFilterPositiveBias,
+            "post_neg_bias" => ParamKind::PostFilterNegativeBias,
+            "sign_hyst" => ParamKind::SignHysteresis,
+            "fcur" => ParamKind::FinalFilterCur,
+            "fprev" => ParamKind::FinalFilterPrev,
+            "fprev2" => ParamKind::FinalFilterPrev2,
+            "fprev3" => ParamKind::FinalFilterPrev3,
+            "fnonzero" => ParamKind::FinalNonzeroBias,
+            _ => return None,
+        })
+    }
 
     fn deltas(self) -> &'static [i32] {
         match self {
@@ -235,6 +262,7 @@ fn run() -> Result<(), String> {
     let mut peak_penalty_weight = 0.0f64;
     let mut require_first_nonzero_match = false;
     let mut raw_pair_input = false;
+    let mut search_kinds = ParamKind::ALL.to_vec();
     let mut top_candidates: Option<usize> = None;
     let mut start_params = AudioOutputParams::default();
     let mut positional = Vec::new();
@@ -298,6 +326,12 @@ fn run() -> Result<(), String> {
             }
             "--require-first-nonzero-match" => require_first_nonzero_match = true,
             "--raw-pair-input" => raw_pair_input = true,
+            "--only-params" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing only-params value".to_string())?;
+                search_kinds = parse_param_kinds(&value)?;
+            }
             "--top-candidates" => {
                 let value = args
                     .next()
@@ -409,7 +443,7 @@ fn run() -> Result<(), String> {
 
     if positional.len() < 2 || positional.len() % 2 != 0 {
         return Err(
-            "usage: tune_audio [--max-first-regression value] [--max-improvements count] [--max-peak-overage value] [--max-param-changes 1|2] [--peak-penalty-weight value] [--top-candidates count] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
+            "usage: tune_audio [--max-first-regression value] [--max-improvements count] [--max-peak-overage value] [--max-param-changes 1|2] [--peak-penalty-weight value] [--only-params key[,key...]] [--top-candidates count] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
                 .to_string(),
         );
     }
@@ -451,6 +485,7 @@ fn run() -> Result<(), String> {
         peak_penalty_weight,
         require_first_nonzero_match,
         raw_pair_input,
+        &search_kinds,
         top_candidates,
     );
     if let Some((best_params, best_score)) = best {
@@ -469,6 +504,25 @@ fn parse_i32_arg(value: Option<String>, missing: &str) -> Result<i32, String> {
         .map_err(|_| missing.replace("missing", "invalid"))
 }
 
+fn parse_param_kinds(value: &str) -> Result<Vec<ParamKind>, String> {
+    let mut kinds = Vec::new();
+    for token in value.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let kind = ParamKind::parse(token)
+            .ok_or_else(|| format!("unknown param key for --only-params: {token}"))?;
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
+        return Err("only-params must name at least one search key".to_string());
+    }
+    Ok(kinds)
+}
+
 fn search(
     datasets: &[Dataset],
     start: AudioOutputParams,
@@ -480,6 +534,7 @@ fn search(
     peak_penalty_weight: f64,
     require_first_nonzero_match: bool,
     raw_pair_input: bool,
+    search_kinds: &[ParamKind],
     top_candidates: Option<usize>,
 ) -> Option<(AudioOutputParams, CandidateScore)> {
     let mut best = if (require_first_nonzero_match && !matches_first_nonzero(datasets, baseline))
@@ -500,7 +555,7 @@ fn search(
             .map(|(params, _)| *params)
             .unwrap_or(start);
 
-        for (i, first) in ParamKind::ALL.iter().enumerate() {
+        for (i, first) in search_kinds.iter().enumerate() {
             for &first_delta in first.deltas() {
                 if first_delta == 0 {
                     continue;
@@ -524,7 +579,7 @@ fn search(
             if max_param_changes < 2 {
                 continue;
             }
-            for second in ParamKind::ALL.iter().skip(i + 1) {
+            for second in search_kinds.iter().skip(i + 1) {
                 for &first_delta in first.deltas() {
                     for &second_delta in second.deltas() {
                         if first_delta == 0 && second_delta == 0 {
