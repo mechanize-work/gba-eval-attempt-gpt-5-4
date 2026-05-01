@@ -74,8 +74,8 @@ const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 35;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN: u32 = 128;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_NUM: u32 = 1;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_DEN: u32 = 1;
-const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 5;
-const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 16;
+const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 39;
+const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 128;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
@@ -124,6 +124,7 @@ enum AudioCaptureMode {
     PointBlend,
     PointWindowBlend,
     PointSegmentBlend,
+    PointSegmentRampBlend,
     Endpoint,
     EndpointAfterTimer,
 }
@@ -245,6 +246,9 @@ pub(crate) struct Emulator {
     audio_capture_window_left: i64,
     audio_capture_window_right: i64,
     audio_capture_window_cycles: u32,
+    audio_capture_window_weighted_left: i64,
+    audio_capture_window_weighted_right: i64,
+    audio_capture_window_weight_total: i64,
     audio_delay_pairs: usize,
     audio_delay_line: VecDeque<i32>,
     audio_input_history: i16,
@@ -338,6 +342,9 @@ impl Emulator {
             audio_capture_window_left: 0,
             audio_capture_window_right: 0,
             audio_capture_window_cycles: 0,
+            audio_capture_window_weighted_left: 0,
+            audio_capture_window_weighted_right: 0,
+            audio_capture_window_weight_total: 0,
             audio_delay_pairs: AUDIO_OUTPUT_DELAY_PAIRS,
             audio_delay_line: VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1),
             audio_input_history: 0,
@@ -1233,6 +1240,46 @@ impl Emulator {
         };
         self.sound_fifo_refill_pending = [false; 2];
         Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn audio_capture_mode_for_debug(&self) -> String {
+        match self.audio_capture_mode {
+            AudioCaptureMode::Average => "average".to_string(),
+            AudioCaptureMode::Midpoint => "midpoint".to_string(),
+            AudioCaptureMode::Point => {
+                format!("point:{}/{}", self.audio_capture_point_num, self.audio_capture_point_den)
+            }
+            AudioCaptureMode::PointBlend => format!(
+                "point-blend:{}/{}:{}/{}",
+                self.audio_capture_point_num,
+                self.audio_capture_point_den,
+                self.audio_capture_blend_num,
+                self.audio_capture_blend_den
+            ),
+            AudioCaptureMode::PointWindowBlend => format!(
+                "point-window-blend:{}/{}:{}/{}:{}/{}",
+                self.audio_capture_point_num,
+                self.audio_capture_point_den,
+                self.audio_capture_window_num,
+                self.audio_capture_window_den,
+                self.audio_capture_blend_num,
+                self.audio_capture_blend_den
+            ),
+            AudioCaptureMode::PointSegmentBlend => format!(
+                "point-segment-blend:{}/{}:{}/{}:{}/{}:{}/{}",
+                self.audio_capture_point_num,
+                self.audio_capture_point_den,
+                self.audio_capture_window_start_num,
+                self.audio_capture_window_start_den,
+                self.audio_capture_window_num,
+                self.audio_capture_window_den,
+                self.audio_capture_blend_num,
+                self.audio_capture_blend_den
+            ),
+            AudioCaptureMode::Endpoint => "endpoint".to_string(),
+            AudioCaptureMode::EndpointAfterTimer => "endpoint-after-timer".to_string(),
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -2382,6 +2429,10 @@ impl NativeEmulator {
         self.inner.audio_params_for_debug()
     }
 
+    pub fn audio_capture_mode_for_debug(&self) -> String {
+        self.inner.audio_capture_mode_for_debug()
+    }
+
     pub fn set_keys(&mut self, keys: u32) {
         self.inner.keys = (keys & 0x03ff) as u16;
     }
@@ -3224,6 +3275,19 @@ mod tests {
         assert_eq!(emu.inner.audio_capture_window_den, 4);
         assert_eq!(emu.inner.audio_capture_blend_num, 1);
         assert_eq!(emu.inner.audio_capture_blend_den, 4);
+    }
+
+    #[test]
+    fn audio_capture_mode_for_debug_round_trips_segment_mode() {
+        let mut emu = NativeEmulator { inner: Emulator::new() };
+
+        emu.set_audio_capture_mode_for_debug("point-segment-blend:3/4:1/4:3/4:1/4")
+            .unwrap();
+
+        assert_eq!(
+            emu.audio_capture_mode_for_debug(),
+            "point-segment-blend:3/4:1/4:3/4:1/4"
+        );
     }
 
     #[test]

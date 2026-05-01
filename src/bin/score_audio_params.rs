@@ -83,9 +83,13 @@ fn run() -> Result<(), String> {
     }
 
     let rom = fs::read(&rom_path).map_err(|e| format!("failed to read ROM: {e}"))?;
-    let baseline_label = NativeEmulator::new_with_rom(&rom)
-        .ok_or_else(|| "failed to initialize emulator".to_string())?
-        .audio_params_for_debug();
+    let baseline_emu = NativeEmulator::new_with_rom(&rom)
+        .ok_or_else(|| "failed to initialize emulator".to_string())?;
+    let baseline_label = format!(
+        "capture={} {}",
+        baseline_emu.audio_capture_mode_for_debug(),
+        baseline_emu.audio_params_for_debug()
+    );
     let datasets = dataset_args
         .into_iter()
         .map(|(frames, path)| {
