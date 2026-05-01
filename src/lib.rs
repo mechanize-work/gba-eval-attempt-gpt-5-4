@@ -4,9 +4,7 @@ mod ppu;
 use std::cell::UnsafeCell;
 use std::sync::OnceLock;
 
-use cpu::Cpu;
-#[cfg(test)]
-use cpu::Mode;
+use cpu::{Cpu, Mode};
 
 const BIOS_SIZE: usize = 16 * 1024;
 const ROM_BUFFER_SIZE: usize = 32 * 1024 * 1024;
@@ -173,6 +171,13 @@ impl Emulator {
 
     fn run_cycles(&mut self, mut cycles: u32) {
         while cycles > 0 {
+            if self.irq_pending() {
+                let used = self.service_irq();
+                self.advance_time(used);
+                cycles = cycles.saturating_sub(used);
+                continue;
+            }
+
             if self.stopped {
                 self.advance_time(cycles);
                 break;
@@ -187,6 +192,18 @@ impl Emulator {
             self.advance_time(used);
             cycles = cycles.saturating_sub(used);
         }
+    }
+
+    fn irq_pending(&self) -> bool {
+        (self.io[REG_IME] & 1) != 0
+            && !self.cpu.irq_disabled()
+            && (self.io_read_u16_raw(REG_IE) & self.io_read_u16_raw(REG_IF)) != 0
+    }
+
+    fn service_irq(&mut self) -> u32 {
+        self.cpu
+            .enter_exception(Mode::Irq, 0x18, self.cpu.pc().wrapping_add(4));
+        3
     }
 
     fn append_silence_for_frame(&mut self) {
@@ -766,10 +783,17 @@ impl NativeEmulator {
     }
 
     pub fn step_instruction(&mut self) -> u32 {
-        if self.inner.rom_len == 0 || self.inner.halted || self.inner.stopped {
+        if self.inner.rom_len == 0 || self.inner.stopped {
             return 0;
         }
-        let used = self.inner.step_cpu().max(1);
+        if self.inner.halted && !self.inner.irq_pending() {
+            return 0;
+        }
+        let used = if self.inner.irq_pending() {
+            self.inner.service_irq()
+        } else {
+            self.inner.step_cpu().max(1)
+        };
         self.inner.advance_time(used);
         used
     }
@@ -836,6 +860,10 @@ impl NativeEmulator {
 
     pub fn last_dispcnt_value(&self) -> u16 {
         self.inner.debug_last_dispcnt_value
+    }
+
+    pub fn peek_u32(&self, addr: u32) -> u32 {
+        self.inner.read_u32_mapped(addr)
     }
 }
 

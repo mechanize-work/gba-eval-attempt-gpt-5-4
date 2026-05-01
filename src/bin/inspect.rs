@@ -29,7 +29,9 @@ fn run() -> Result<(), String> {
     let mut step_count: u64 = 0;
     let mut trace_steps = false;
     let mut until_pc: Option<u32> = None;
+    let mut until_pc_hits: u64 = 1;
     let mut max_steps: u64 = 1_000_000;
+    let mut peek_addrs: Vec<u32> = Vec::new();
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -49,12 +51,26 @@ fn run() -> Result<(), String> {
                 let text = args.next().ok_or_else(|| "missing pc value".to_string())?;
                 until_pc = Some(parse_u32(&text).map_err(|_| "invalid pc value".to_string())?);
             }
+            "--until-pc-hits" => {
+                until_pc_hits = args
+                    .next()
+                    .ok_or_else(|| "missing pc hit count".to_string())?
+                    .parse()
+                    .map_err(|_| "pc hit count must be an integer".to_string())?;
+                if until_pc_hits == 0 {
+                    return Err("pc hit count must be at least 1".to_string());
+                }
+            }
             "--max-steps" => {
                 max_steps = args
                     .next()
                     .ok_or_else(|| "missing max step count".to_string())?
                     .parse()
                     .map_err(|_| "max step count must be an integer".to_string())?;
+            }
+            "--peek" => {
+                let text = args.next().ok_or_else(|| "missing peek address".to_string())?;
+                peek_addrs.push(parse_u32(&text).map_err(|_| "invalid peek address".to_string())?);
             }
             _ => return Err(format!("unknown argument: {flag}")),
         }
@@ -96,12 +112,16 @@ fn run() -> Result<(), String> {
 
     if let Some(target_pc) = until_pc {
         let mut steps = 0u64;
-        while emu.pc() != target_pc && steps < max_steps {
+        let mut hits = 0u64;
+        while hits < until_pc_hits && steps < max_steps {
             let cycles = emu.step_instruction();
             if cycles == 0 {
                 break;
             }
             steps += 1;
+            if emu.pc() == target_pc {
+                hits += 1;
+            }
             if trace_steps {
                 let regs = emu.registers();
                 println!(
@@ -118,9 +138,10 @@ fn run() -> Result<(), String> {
             }
         }
         println!(
-            "until_pc target=0x{:08x} hit={} steps={}",
+            "until_pc target=0x{:08x} hit={} hits={} steps={}",
             target_pc,
-            emu.pc() == target_pc,
+            emu.pc() == target_pc && hits >= until_pc_hits,
+            hits,
             steps
         );
     }
@@ -175,6 +196,9 @@ fn run() -> Result<(), String> {
     println!("audio_pairs={}", all_audio.len() / 2);
     println!("audio_rate={}", emu.audio_rate());
     println!("audio_hash=0x{:016x}", fnv1a_i16(&all_audio));
+    for addr in peek_addrs {
+        println!("peek32[0x{addr:08x}]=0x{:08x}", emu.peek_u32(addr));
+    }
 
     Ok(())
 }

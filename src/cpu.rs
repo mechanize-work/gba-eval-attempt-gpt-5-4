@@ -109,6 +109,10 @@ impl Cpu {
         self.cpsr & (1 << 5) != 0
     }
 
+    pub(crate) fn irq_disabled(&self) -> bool {
+        self.cpsr & (1 << 7) != 0
+    }
+
     fn carry(&self) -> bool {
         self.cpsr & (1 << 29) != 0
     }
@@ -324,7 +328,7 @@ impl Cpu {
         }
     }
 
-    fn enter_exception(&mut self, mode: Mode, vector: u32, return_addr: u32) {
+    pub(crate) fn enter_exception(&mut self, mode: Mode, vector: u32, return_addr: u32) {
         let old_cpsr = self.cpsr;
         self.set_spsr(mode, old_cpsr);
         let next = (old_cpsr & 0xf000_0040) | (1 << 7) | (mode as u32);
@@ -1027,7 +1031,7 @@ impl Emulator {
 
         if instr & 0xfc00 == 0x4400 {
             let op = (instr >> 8) & 0x3;
-            let rs = (((instr >> 3) & 0x7) | ((instr >> 6) & 0x8)) as usize;
+            let rs = (((instr >> 3) & 0x7) | ((instr >> 3) & 0x8)) as usize;
             let rd = ((instr & 0x7) | ((instr >> 4) & 0x8)) as usize;
             let rhs = self.cpu.read_reg(rs, pc, true);
             match op {
@@ -1135,23 +1139,24 @@ impl Emulator {
             let rb = ((instr >> 3) & 0x7) as usize;
             let rd = (instr & 0x7) as usize;
             let base = self.cpu.read_reg(rb, pc, true);
-            let addr = match op {
-                0 | 2 => base.wrapping_add(imm5 << 2),
-                1 | 3 => base.wrapping_add(imm5),
-                _ => base,
+            let word = op < 2;
+            let load = op & 1 != 0;
+            let addr = if word {
+                base.wrapping_add(imm5 << 2)
+            } else {
+                base.wrapping_add(imm5)
             };
-            match op {
-                0 => self.write_u32_mapped(addr, self.cpu.read_reg(rd, pc, true)),
-                1 => self.write_u8_mapped(addr, self.cpu.read_reg(rd, pc, true) as u8),
-                2 => {
-                    let value = self.read_u32_mapped(addr);
-                    self.cpu.write_reg(rd, value);
-                }
-                3 => {
-                    let value = self.read_u8_mapped(addr) as u32;
-                    self.cpu.write_reg(rd, value);
-                }
-                _ => {}
+            if load {
+                let value = if word {
+                    self.read_u32_mapped(addr)
+                } else {
+                    self.read_u8_mapped(addr) as u32
+                };
+                self.cpu.write_reg(rd, value);
+            } else if word {
+                self.write_u32_mapped(addr, self.cpu.read_reg(rd, pc, true));
+            } else {
+                self.write_u8_mapped(addr, self.cpu.read_reg(rd, pc, true) as u8);
             }
             self.cpu.load_pc_thumb(next_pc);
             return 2;
@@ -1309,7 +1314,8 @@ impl Emulator {
         if instr & 0xf800 == 0xf000 {
             let offset = sign_extend(((instr & 0x07ff) as u32) << 12, 23);
             self.cpu.thumb_bl_prefix = Some(pc.wrapping_add(4).wrapping_add(offset));
-            self.cpu.load_pc_thumb(next_pc);
+            // Keep the BL prefix alive for the immediately following low-halfword.
+            self.cpu.regs[15] = next_pc & !1;
             return 1;
         }
 
