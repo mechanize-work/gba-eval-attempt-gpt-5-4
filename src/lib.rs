@@ -70,12 +70,12 @@ const DIRECT_SOUND_FIFO_DMA_THRESHOLD: usize = 16;
 const AUDIO_OUTPUT_SCALE: i32 = 64;
 const AUDIO_CAPTURE_DEFAULT_POINT_NUM: u32 = 2;
 const AUDIO_CAPTURE_DEFAULT_POINT_DEN: u32 = 7;
-const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 0;
-const AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN: u32 = 1;
+const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 35;
+const AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN: u32 = 128;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_NUM: u32 = 1;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_DEN: u32 = 1;
-const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 11;
-const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 32;
+const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 5;
+const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 16;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
@@ -315,7 +315,7 @@ impl Emulator {
             audio_pair_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
-            audio_capture_mode: AudioCaptureMode::PointBlend,
+            audio_capture_mode: AudioCaptureMode::PointSegmentBlend,
             audio_mix_mode: AudioMixMode::Legacy,
             audio_output_params: AudioOutputParams::default(),
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
@@ -3018,6 +3018,8 @@ mod tests {
         emu.audio_capture_mode = AudioCaptureMode::PointWindowBlend;
         emu.audio_capture_point_num = 3;
         emu.audio_capture_point_den = 4;
+        emu.audio_capture_window_start_num = 0;
+        emu.audio_capture_window_start_den = 1;
         emu.audio_capture_window_num = 1;
         emu.audio_capture_window_den = 2;
         emu.audio_capture_blend_num = 1;
@@ -3056,6 +3058,8 @@ mod tests {
         point_window_blend.audio_capture_mode = AudioCaptureMode::PointWindowBlend;
         point_window_blend.audio_capture_point_num = 3;
         point_window_blend.audio_capture_point_den = 4;
+        point_window_blend.audio_capture_window_start_num = 0;
+        point_window_blend.audio_capture_window_start_den = 1;
         point_window_blend.audio_capture_window_num = 1;
         point_window_blend.audio_capture_window_den = 1;
         point_window_blend.audio_capture_blend_num = 1;
@@ -3196,6 +3200,8 @@ mod tests {
         assert_eq!(emu.inner.audio_capture_mode, AudioCaptureMode::PointWindowBlend);
         assert_eq!(emu.inner.audio_capture_point_num, 3);
         assert_eq!(emu.inner.audio_capture_point_den, 4);
+        assert_eq!(emu.inner.audio_capture_window_start_num, 0);
+        assert_eq!(emu.inner.audio_capture_window_start_den, 1);
         assert_eq!(emu.inner.audio_capture_window_num, 1);
         assert_eq!(emu.inner.audio_capture_window_den, 2);
         assert_eq!(emu.inner.audio_capture_blend_num, 1);
