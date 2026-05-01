@@ -86,6 +86,10 @@ pub(crate) struct Emulator {
     debug_dispcnt_writes: u32,
     debug_last_dispcnt_write_pc: u32,
     debug_last_dispcnt_value: u16,
+    debug_last_ie_write_pc: u32,
+    debug_last_ie_value: u16,
+    debug_last_haltcnt_write_pc: u32,
+    debug_last_haltcnt_value: u8,
 }
 
 impl Emulator {
@@ -117,6 +121,10 @@ impl Emulator {
             debug_dispcnt_writes: 0,
             debug_last_dispcnt_write_pc: 0,
             debug_last_dispcnt_value: 0,
+            debug_last_ie_write_pc: 0,
+            debug_last_ie_value: 0,
+            debug_last_haltcnt_write_pc: 0,
+            debug_last_haltcnt_value: 0,
         };
         emu.reset_runtime_state();
         emu
@@ -151,6 +159,10 @@ impl Emulator {
         self.debug_dispcnt_writes = 0;
         self.debug_last_dispcnt_write_pc = 0;
         self.debug_last_dispcnt_value = 0;
+        self.debug_last_ie_write_pc = 0;
+        self.debug_last_ie_value = 0;
+        self.debug_last_haltcnt_write_pc = 0;
+        self.debug_last_haltcnt_value = 0;
         self.cpu.reset();
 
         self.io_write_u16_raw(REG_DISPCNT, 0x0080);
@@ -392,6 +404,18 @@ impl Emulator {
             self.debug_last_dispcnt_write_pc = self.cpu.pc();
             self.debug_last_dispcnt_value = self.io_read_u16_raw(REG_DISPCNT);
         }
+        if reg == REG_IE {
+            self.debug_last_ie_write_pc = self.cpu.pc();
+            self.debug_last_ie_value = self.io_read_u16_raw(REG_IE);
+        }
+        if reg + 1 == REG_HALTCNT {
+            if offset == REG_HALTCNT {
+                self.debug_last_haltcnt_write_pc = self.cpu.pc();
+                self.debug_last_haltcnt_value = self.io[REG_HALTCNT];
+                self.handle_haltcnt_write();
+            }
+            return;
+        }
         self.handle_io_write(reg, old);
     }
 
@@ -410,6 +434,14 @@ impl Emulator {
             self.debug_dispcnt_writes = self.debug_dispcnt_writes.wrapping_add(1);
             self.debug_last_dispcnt_write_pc = self.cpu.pc();
             self.debug_last_dispcnt_value = value;
+        }
+        if offset == REG_IE {
+            self.debug_last_ie_write_pc = self.cpu.pc();
+            self.debug_last_ie_value = value;
+        }
+        if offset + 1 == REG_HALTCNT {
+            self.debug_last_haltcnt_write_pc = self.cpu.pc();
+            self.debug_last_haltcnt_value = self.io[REG_HALTCNT];
         }
         self.handle_io_write(offset, old);
     }
@@ -437,14 +469,7 @@ impl Emulator {
                 self.io[REG_IME] = ime;
                 self.poll_halt_wakeup();
             }
-            _ if offset == REG_HALTCNT || offset + 1 == REG_HALTCNT => {
-                let value = self.io[REG_HALTCNT];
-                if value & 0x80 == 0 {
-                    self.halted = true;
-                } else {
-                    self.stopped = true;
-                }
-            }
+            _ if offset == REG_HALTCNT || offset + 1 == REG_HALTCNT => self.handle_haltcnt_write(),
             _ if DMA_REG_BASES
                 .iter()
                 .any(|base| offset == base + 0x0a || offset == base + 0x0b) =>
@@ -456,6 +481,15 @@ impl Emulator {
                 self.handle_dma_control_write(channel);
             }
             _ => {}
+        }
+    }
+
+    fn handle_haltcnt_write(&mut self) {
+        let value = self.io[REG_HALTCNT];
+        if value & 0x80 == 0 {
+            self.halted = true;
+        } else {
+            self.stopped = true;
         }
     }
 
@@ -883,6 +917,22 @@ impl NativeEmulator {
         self.inner.debug_last_dispcnt_value
     }
 
+    pub fn last_ie_write_pc(&self) -> u32 {
+        self.inner.debug_last_ie_write_pc
+    }
+
+    pub fn last_ie_value(&self) -> u16 {
+        self.inner.debug_last_ie_value
+    }
+
+    pub fn last_haltcnt_write_pc(&self) -> u32 {
+        self.inner.debug_last_haltcnt_write_pc
+    }
+
+    pub fn last_haltcnt_value(&self) -> u8 {
+        self.inner.debug_last_haltcnt_value
+    }
+
     pub fn peek_u32(&self, addr: u32) -> u32 {
         self.inner.read_u32_mapped(addr)
     }
@@ -1029,5 +1079,15 @@ mod tests {
             emu.audio_buffer.clear();
             emu.frames_emulated += 1;
         }
+    }
+
+    #[test]
+    fn postflg_byte_write_does_not_enter_halt() {
+        let mut emu = Emulator::new();
+
+        emu.write_io_u8(0x300, 0x01);
+
+        assert!(!emu.halted);
+        assert!(!emu.stopped);
     }
 }

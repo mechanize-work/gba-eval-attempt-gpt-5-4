@@ -191,6 +191,16 @@ fn run() -> Result<(), String> {
         emu.last_dispcnt_write_pc(),
         emu.last_dispcnt_value()
     );
+    println!(
+        "last_ie_write=0x{:08x}:0x{:04x}",
+        emu.last_ie_write_pc(),
+        emu.last_ie_value()
+    );
+    println!(
+        "last_haltcnt_write=0x{:08x}:0x{:02x}",
+        emu.last_haltcnt_write_pc(),
+        emu.last_haltcnt_value()
+    );
     let regs = emu.registers();
     for (idx, value) in regs.iter().enumerate() {
         println!("r{idx}=0x{value:08x}");
