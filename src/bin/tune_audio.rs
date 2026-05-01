@@ -16,11 +16,12 @@ const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [127, 0, 4, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
-const SEARCH_INPUT_CUR_DELTAS: [i32; 5] = [-4, -2, 0, 2, 4];
+const SEARCH_INPUT_CUR_DELTAS: [i32; 7] = [-8, -4, -2, 0, 2, 4, 8];
 const SEARCH_INPUT_PREV_DELTAS: [i32; 9] = [-8, -4, -2, -1, 0, 1, 2, 4, 8];
 const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_THR_DELTAS: [i32; 7] = [-80, -40, -20, 0, 20, 40, 80];
 const SEARCH_CNUM_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+const SEARCH_PREFILTER_GAIN_DELTAS: [i32; 7] = [-8, -4, -2, 0, 2, 4, 8];
 const SEARCH_BIAS_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_POST_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_HYST_DELTAS: [i32; 9] = [-16, -8, -4, -2, 0, 2, 4, 8, 16];
@@ -60,7 +61,7 @@ impl Default for AudioOutputParams {
             input_filter_prev: -16,
             prefilter_gain_num: 136,
             compress_threshold_positive: 2_400,
-            compress_threshold_negative: 2_100,
+            compress_threshold_negative: 2_080,
             compress_num_positive: 128,
             compress_num_negative: 127,
             positive_bias: 66,
@@ -181,7 +182,7 @@ impl ParamKind {
             ParamKind::Deadzone => &SEARCH_DEAD_DELTAS,
             ParamKind::InputFilterCur => &SEARCH_INPUT_CUR_DELTAS,
             ParamKind::InputFilterPrev => &SEARCH_INPUT_PREV_DELTAS,
-            ParamKind::PrefilterGainNum => &SEARCH_CNUM_DELTAS,
+            ParamKind::PrefilterGainNum => &SEARCH_PREFILTER_GAIN_DELTAS,
             ParamKind::CompressThresholdPositive | ParamKind::CompressThresholdNegative => &SEARCH_THR_DELTAS,
             ParamKind::CompressNumPositive | ParamKind::CompressNumNegative => &SEARCH_CNUM_DELTAS,
             ParamKind::PositiveBias | ParamKind::NegativeBias => &SEARCH_BIAS_DELTAS,
@@ -205,13 +206,13 @@ impl ParamKind {
         match self {
             ParamKind::Deadzone => params.deadzone = (params.deadzone + delta).max(0),
             ParamKind::InputFilterCur => {
-                params.input_filter_cur = (params.input_filter_cur + delta).clamp(120, 136)
+                params.input_filter_cur = (params.input_filter_cur + delta).clamp(120, 144)
             }
             ParamKind::InputFilterPrev => {
-                params.input_filter_prev = (params.input_filter_prev + delta).clamp(-16, 16)
+                params.input_filter_prev = (params.input_filter_prev + delta).clamp(-24, 24)
             }
             ParamKind::PrefilterGainNum => {
-                params.prefilter_gain_num = (params.prefilter_gain_num + delta).clamp(120, 136)
+                params.prefilter_gain_num = (params.prefilter_gain_num + delta).clamp(120, 144)
             }
             ParamKind::CompressThresholdPositive => {
                 params.compress_threshold_positive =
@@ -308,9 +309,9 @@ fn run() -> Result<(), String> {
                     .ok_or_else(|| "missing max param changes value".to_string())?;
                 max_param_changes = value
                     .parse::<usize>()
-                    .map_err(|_| "max param changes value must be 1 or 2".to_string())?;
-                if !(1..=2).contains(&max_param_changes) {
-                    return Err("max param changes value must be 1 or 2".to_string());
+                    .map_err(|_| "max param changes value must be between 1 and 3".to_string())?;
+                if !(1..=3).contains(&max_param_changes) {
+                    return Err("max param changes value must be between 1 and 3".to_string());
                 }
             }
             "--peak-penalty-weight" => {
@@ -347,15 +348,15 @@ fn run() -> Result<(), String> {
             }
             "--start-input-filter-cur" => {
                 start_params.input_filter_cur =
-                    parse_i32_arg(args.next(), "missing input-filter cur value")?.clamp(120, 136);
+                    parse_i32_arg(args.next(), "missing input-filter cur value")?.clamp(120, 144);
             }
             "--start-input-filter-prev" => {
                 start_params.input_filter_prev =
-                    parse_i32_arg(args.next(), "missing input-filter prev value")?.clamp(-16, 16);
+                    parse_i32_arg(args.next(), "missing input-filter prev value")?.clamp(-24, 24);
             }
             "--start-prefilter-gain-num" => {
                 start_params.prefilter_gain_num =
-                    parse_i32_arg(args.next(), "missing prefilter gain numerator value")?.clamp(120, 136);
+                    parse_i32_arg(args.next(), "missing prefilter gain numerator value")?.clamp(120, 144);
             }
             "--start-threshold" => {
                 start_params.compress_threshold_positive =
@@ -579,7 +580,7 @@ fn search(
             if max_param_changes < 2 {
                 continue;
             }
-            for second in search_kinds.iter().skip(i + 1) {
+            for (j, second) in search_kinds.iter().enumerate().skip(i + 1) {
                 for &first_delta in first.deltas() {
                     for &second_delta in second.deltas() {
                         if first_delta == 0 && second_delta == 0 {
@@ -601,6 +602,37 @@ fn search(
                             &mut round_top,
                             top_candidates,
                         );
+                    }
+                }
+                if max_param_changes < 3 {
+                    continue;
+                }
+                for third in search_kinds.iter().skip(j + 1) {
+                    for &first_delta in first.deltas() {
+                        for &second_delta in second.deltas() {
+                            for &third_delta in third.deltas() {
+                                if first_delta == 0 && second_delta == 0 && third_delta == 0 {
+                                    continue;
+                                }
+                                let mut candidate = search_params;
+                                first.apply(&mut candidate, first_delta);
+                                second.apply(&mut candidate, second_delta);
+                                third.apply(&mut candidate, third_delta);
+                                consider_candidate(
+                                    datasets,
+                                    baseline,
+                                    max_first_regression,
+                                    max_peak_overage,
+                                    peak_penalty_weight,
+                                    require_first_nonzero_match,
+                                    raw_pair_input,
+                                    candidate,
+                                    &mut round_best,
+                                    &mut round_top,
+                                    top_candidates,
+                                );
+                            }
+                        }
                     }
                 }
             }

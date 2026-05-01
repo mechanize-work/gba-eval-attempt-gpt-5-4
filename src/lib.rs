@@ -82,7 +82,7 @@ const AUDIO_OUTPUT_DEADZONE: i32 = 0;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_400;
-const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_100;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_080;
 const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
@@ -632,9 +632,9 @@ impl Emulator {
                 .map_err(|_| format!("invalid audio param value for {key}: {value_text}"))?;
             match key {
                 "dead" => params.deadzone = value.max(0),
-                "icur" => params.input_filter_cur = value.clamp(120, 136),
-                "iprev" => params.input_filter_prev = value.clamp(-16, 16),
-                "pregain" => params.prefilter_gain_num = value.clamp(120, 136),
+                "icur" => params.input_filter_cur = value.clamp(120, 144),
+                "iprev" => params.input_filter_prev = value.clamp(-24, 24),
+                "pregain" => params.prefilter_gain_num = value.clamp(120, 144),
                 "pthr" => params.compress_threshold_positive = value.max(0),
                 "nthr" => params.compress_threshold_negative = value.max(0),
                 "pcnum" => params.compress_num_positive = value.clamp(120, 128),
@@ -1669,7 +1669,7 @@ impl NativeEmulator {
     }
 
     pub fn set_audio_prefilter_gain_num_for_debug(&mut self, gain_num: i32) {
-        self.inner.audio_output_params.prefilter_gain_num = gain_num.clamp(120, 136);
+        self.inner.audio_output_params.prefilter_gain_num = gain_num.clamp(120, 144);
         self.inner.reset_audio_output_history_for_debug();
     }
 
@@ -2080,7 +2080,7 @@ mod tests {
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_516);
-        assert_eq!(output, -3_503);
+        assert_eq!(output, -3_502);
     }
 
     #[test]
@@ -2102,14 +2102,14 @@ mod tests {
         emu.audio_final_filter_history[0] = 19;
 
         emu.set_audio_params_for_debug(
-            "improved dead=0 icur=136 iprev=-16 pregain=136 pthr=2400 nthr=2340 pcnum=126 ncnum=124 pos_bias=67 neg_bias=75 cur=136 prev=-8 prev2=6 post_pos_bias=5 post_neg_bias=-7 sign_hyst=28 fcur=126 fprev=0 fprev2=4 fprev3=-8 fnonzero=2 total_rmse=246.133884 objective_total=246.678884 total_peak_overage=109",
+            "improved dead=0 icur=140 iprev=-20 pregain=142 pthr=2400 nthr=2340 pcnum=126 ncnum=124 pos_bias=67 neg_bias=75 cur=136 prev=-8 prev2=6 post_pos_bias=5 post_neg_bias=-7 sign_hyst=28 fcur=126 fprev=0 fprev2=4 fprev3=-8 fnonzero=2 total_rmse=246.133884 objective_total=246.678884 total_peak_overage=109",
         )
         .expect("params should parse");
 
         assert_eq!(emu.audio_output_params.deadzone, 0);
-        assert_eq!(emu.audio_output_params.input_filter_cur, 136);
-        assert_eq!(emu.audio_output_params.input_filter_prev, -16);
-        assert_eq!(emu.audio_output_params.prefilter_gain_num, 136);
+        assert_eq!(emu.audio_output_params.input_filter_cur, 140);
+        assert_eq!(emu.audio_output_params.input_filter_prev, -20);
+        assert_eq!(emu.audio_output_params.prefilter_gain_num, 142);
         assert_eq!(emu.audio_output_params.compress_threshold_positive, 2_400);
         assert_eq!(emu.audio_output_params.compress_threshold_negative, 2_340);
         assert_eq!(emu.audio_output_params.compress_num_positive, 126);
