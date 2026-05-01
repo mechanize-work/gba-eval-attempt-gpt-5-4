@@ -34,6 +34,9 @@ const FRAME_CYCLES: u32 = CYCLES_PER_LINE * TOTAL_LINES;
 const REG_DISPCNT: usize = 0x000;
 const REG_DISPSTAT: usize = 0x004;
 const REG_VCOUNT: usize = 0x006;
+const REG_TM0CNT_L: usize = 0x100;
+#[cfg(test)]
+const REG_TM0CNT_H: usize = 0x102;
 const REG_KEYINPUT: usize = 0x130;
 const REG_KEYCNT: usize = 0x132;
 const REG_IE: usize = 0x200;
@@ -45,8 +48,15 @@ const REG_HALTCNT: usize = 0x301;
 const IRQ_VBLANK: u16 = 1 << 0;
 const IRQ_HBLANK: u16 = 1 << 1;
 const IRQ_VCOUNT: u16 = 1 << 2;
+const IRQ_TIMER0: u16 = 1 << 3;
+const IRQ_TIMER1: u16 = 1 << 4;
+const IRQ_TIMER2: u16 = 1 << 5;
+const IRQ_TIMER3: u16 = 1 << 6;
 
 const DMA_REG_BASES: [usize; 4] = [0x0b0, 0x0bc, 0x0c8, 0x0d4];
+const TIMER_REG_BASES: [usize; 4] = [REG_TM0CNT_L, 0x104, 0x108, 0x10c];
+const TIMER_IRQS: [u16; 4] = [IRQ_TIMER0, IRQ_TIMER1, IRQ_TIMER2, IRQ_TIMER3];
+const TIMER_PRESCALERS: [u32; 4] = [1, 64, 256, 1_024];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -79,6 +89,8 @@ pub(crate) struct Emulator {
     audio_fraction: u64,
     keys: u16,
     frame_cycle: u32,
+    timer_counter: [u16; 4],
+    timer_remainder: [u32; 4],
     halted: bool,
     stopped: bool,
     frames_emulated: u64,
@@ -114,6 +126,8 @@ impl Emulator {
             audio_fraction: INITIAL_AUDIO_FRACTION,
             keys: 0,
             frame_cycle: 0,
+            timer_counter: [0; 4],
+            timer_remainder: [0; 4],
             halted: false,
             stopped: false,
             frames_emulated: 0,
@@ -152,6 +166,8 @@ impl Emulator {
         self.audio_fraction = INITIAL_AUDIO_FRACTION;
         self.keys = 0;
         self.frame_cycle = 0;
+        self.timer_counter = [0; 4];
+        self.timer_remainder = [0; 4];
         self.halted = false;
         self.stopped = false;
         self.frames_emulated = 0;
@@ -259,8 +275,10 @@ impl Emulator {
             };
             let to_line_end = CYCLES_PER_LINE - line_cycle;
             let to_frame_end = FRAME_CYCLES - self.frame_cycle;
-            let step = cycles.min(to_hblank.min(to_line_end).min(to_frame_end));
+            let to_timer = self.cycles_to_next_timer_event();
+            let step = cycles.min(to_hblank.min(to_line_end).min(to_frame_end).min(to_timer));
 
+            self.advance_timers(step);
             self.frame_cycle += step;
             cycles -= step;
 
@@ -365,6 +383,15 @@ impl Emulator {
             val if val == REG_DISPSTAT + 1 => (self.computed_dispstat() >> 8) as u8,
             REG_VCOUNT => (self.vcount() & 0xff) as u8,
             val if val == REG_VCOUNT + 1 => (self.vcount() >> 8) as u8,
+            offset if (REG_TM0CNT_L..REG_TM0CNT_L + 0x10).contains(&offset) => {
+                let timer = (offset - REG_TM0CNT_L) / 4;
+                let timer_offset = (offset - REG_TM0CNT_L) % 4;
+                match timer_offset {
+                    0 => self.timer_counter[timer] as u8,
+                    1 => (self.timer_counter[timer] >> 8) as u8,
+                    _ => self.io[offset],
+                }
+            }
             REG_KEYINPUT => (!self.keys & 0xff) as u8,
             val if val == REG_KEYINPUT + 1 => 0xfc | (((!self.keys) >> 8) & 0x03) as u8,
             _ if offset < IO_SIZE => self.io[offset],
@@ -393,6 +420,10 @@ impl Emulator {
             return;
         }
         let reg = offset & !1;
+        let timer_control_write = TIMER_REG_BASES
+            .iter()
+            .position(|base| reg == *base + 2)
+            .map(|timer| (timer, self.io_read_u16_raw(reg)));
         let old = if reg == REG_IF {
             self.io_read_u16_raw(REG_IF)
         } else {
@@ -416,6 +447,10 @@ impl Emulator {
             }
             return;
         }
+        if let Some((timer, old_control)) = timer_control_write {
+            self.handle_timer_control_write(timer, old_control);
+            return;
+        }
         self.handle_io_write(reg, old);
     }
 
@@ -423,6 +458,10 @@ impl Emulator {
         if offset + 1 >= IO_SIZE {
             return;
         }
+        let timer_control_write = TIMER_REG_BASES
+            .iter()
+            .position(|base| offset == *base + 2)
+            .map(|timer| (timer, self.io_read_u16_raw(offset)));
         let old = if offset == REG_IF {
             self.io_read_u16_raw(REG_IF)
         } else {
@@ -442,6 +481,10 @@ impl Emulator {
         if offset + 1 == REG_HALTCNT {
             self.debug_last_haltcnt_write_pc = self.cpu.pc();
             self.debug_last_haltcnt_value = self.io[REG_HALTCNT];
+        }
+        if let Some((timer, old_control)) = timer_control_write {
+            self.handle_timer_control_write(timer, old_control);
+            return;
         }
         self.handle_io_write(offset, old);
     }
@@ -491,6 +534,109 @@ impl Emulator {
         } else {
             self.stopped = true;
         }
+    }
+
+    fn handle_timer_control_write(&mut self, timer: usize, old_control: u16) {
+        let new_control = self.timer_control(timer);
+        let old_enabled = old_control & (1 << 7) != 0;
+        let new_enabled = new_control & (1 << 7) != 0;
+        if !old_enabled && new_enabled {
+            self.timer_counter[timer] = self.timer_reload(timer);
+            self.timer_remainder[timer] = 0;
+        } else if old_enabled && !new_enabled {
+            self.timer_remainder[timer] = 0;
+        }
+    }
+
+    fn timer_reload(&self, timer: usize) -> u16 {
+        self.io_read_u16_raw(TIMER_REG_BASES[timer])
+    }
+
+    fn timer_control(&self, timer: usize) -> u16 {
+        self.io_read_u16_raw(TIMER_REG_BASES[timer] + 2)
+    }
+
+    fn timer_enabled(&self, timer: usize) -> bool {
+        self.timer_control(timer) & (1 << 7) != 0
+    }
+
+    fn timer_count_up(&self, timer: usize) -> bool {
+        timer != 0 && self.timer_control(timer) & (1 << 2) != 0
+    }
+
+    fn timer_irq_enabled(&self, timer: usize) -> bool {
+        self.timer_control(timer) & (1 << 6) != 0
+    }
+
+    fn timer_prescaler(&self, timer: usize) -> u32 {
+        TIMER_PRESCALERS[(self.timer_control(timer) & 0x3) as usize]
+    }
+
+    fn cycles_to_next_timer_event(&self) -> u32 {
+        let mut next = u32::MAX;
+        for timer in 0..4 {
+            if !self.timer_enabled(timer) || self.timer_count_up(timer) {
+                continue;
+            }
+            let ticks_until_overflow = 0x1_0000 - self.timer_counter[timer] as u32;
+            let cycles_until_overflow =
+                ticks_until_overflow.saturating_mul(self.timer_prescaler(timer)) - self.timer_remainder[timer];
+            next = next.min(cycles_until_overflow.max(1));
+        }
+        next
+    }
+
+    fn advance_timers(&mut self, cycles: u32) {
+        if cycles == 0 {
+            return;
+        }
+
+        let mut overflows = [0u32; 4];
+        for timer in 0..4 {
+            if !self.timer_enabled(timer) || self.timer_count_up(timer) {
+                continue;
+            }
+
+            let prescaler = self.timer_prescaler(timer);
+            let total_cycles = self.timer_remainder[timer] + cycles;
+            let increments = total_cycles / prescaler;
+            self.timer_remainder[timer] = total_cycles % prescaler;
+            overflows[timer] = self.advance_timer_counter(timer, increments);
+        }
+
+        for timer in 1..4 {
+            if !self.timer_enabled(timer) || !self.timer_count_up(timer) {
+                continue;
+            }
+            overflows[timer] = self.advance_timer_counter(timer, overflows[timer - 1]);
+        }
+    }
+
+    fn advance_timer_counter(&mut self, timer: usize, increments: u32) -> u32 {
+        if increments == 0 {
+            return 0;
+        }
+
+        let current = self.timer_counter[timer] as u32;
+        let reload = self.timer_reload(timer) as u32;
+        let ticks_until_overflow = 0x1_0000 - current;
+        if increments < ticks_until_overflow {
+            self.timer_counter[timer] = current.wrapping_add(increments) as u16;
+            return 0;
+        }
+
+        let period = 0x1_0000 - reload;
+        let remaining = increments - ticks_until_overflow;
+        let extra_overflows = remaining / period;
+        let final_ticks = remaining % period;
+        let overflows = 1 + extra_overflows;
+        self.timer_counter[timer] = reload.wrapping_add(final_ticks) as u16;
+
+        if self.timer_irq_enabled(timer) {
+            self.raise_interrupt(TIMER_IRQS[timer]);
+        }
+
+        overflows
     }
 
     fn handle_dma_control_write(&mut self, channel: usize) {
@@ -599,6 +745,15 @@ impl Emulator {
         offset % VRAM_SIZE
     }
 
+    fn map_io_addr(addr: u32) -> Option<usize> {
+        let offset = (addr as usize).wrapping_sub(0x0400_0000);
+        if offset < IO_SIZE {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
     fn read_u8_mapped(&self, addr: u32) -> u8 {
         match addr >> 24 {
             0x00 => {
@@ -614,8 +769,7 @@ impl Emulator {
                 self.iwram[offset]
             }
             0x04 => {
-                let offset = addr as usize & (IO_SIZE - 1);
-                self.io_read_u8(offset)
+                Self::map_io_addr(addr).map_or(0, |offset| self.io_read_u8(offset))
             }
             0x05 => {
                 let offset = addr as usize & (PALETTE_SIZE - 1);
@@ -682,8 +836,9 @@ impl Emulator {
                 self.iwram[offset] = value;
             }
             0x04 => {
-                let offset = addr as usize & (IO_SIZE - 1);
-                self.write_io_u8(offset, value);
+                if let Some(offset) = Self::map_io_addr(addr) {
+                    self.write_io_u8(offset, value);
+                }
             }
             0x05 => {
                 let offset = addr as usize & (PALETTE_SIZE - 1);
@@ -718,8 +873,9 @@ impl Emulator {
                 self.iwram[(aligned + 1) & (IWRAM_SIZE - 1)] = (value >> 8) as u8;
             }
             0x04 => {
-                let offset = addr as usize & (IO_SIZE - 1) & !1;
-                self.write_io_u16(offset, value);
+                if let Some(offset) = Self::map_io_addr(addr & !1) {
+                    self.write_io_u16(offset, value);
+                }
             }
             0x05 => {
                 let aligned = (addr as usize & !1) & (PALETTE_SIZE - 1);
@@ -762,8 +918,9 @@ impl Emulator {
                 self.iwram[(base + 3) & (IWRAM_SIZE - 1)] = (value >> 24) as u8;
             }
             0x04 => {
-                let offset = addr as usize & (IO_SIZE - 1) & !1;
-                self.write_io_u32(offset, value);
+                if let Some(offset) = Self::map_io_addr(addr & !3) {
+                    self.write_io_u32(offset, value);
+                }
             }
             0x05 => {
                 let base = (addr as usize & !3) & (PALETTE_SIZE - 1);
@@ -1089,5 +1246,47 @@ mod tests {
 
         assert!(!emu.halted);
         assert!(!emu.stopped);
+    }
+
+    #[test]
+    fn unmapped_io_region_does_not_mirror_haltcnt() {
+        let mut emu = Emulator::new();
+
+        emu.write_u16_mapped(0x04ff_f700, 0x0102);
+
+        assert!(!emu.halted);
+        assert!(!emu.stopped);
+        assert_eq!(emu.io[REG_HALTCNT], 0);
+        assert_eq!(emu.io[0x300], 0);
+    }
+
+    #[test]
+    fn timer_reload_is_copied_on_start_and_overflow_raises_irq() {
+        let mut emu = Emulator::new();
+
+        emu.write_io_u16(REG_TM0CNT_L, 0xfffe);
+        emu.write_io_u16(REG_TM0CNT_H, 0x00c0);
+        assert_eq!(emu.read_u16_mapped(0x0400_0100), 0xfffe);
+
+        emu.advance_time(2);
+
+        assert_eq!(emu.read_u16_mapped(0x0400_0100), 0xfffe);
+        assert_eq!(emu.io_read_u16_raw(REG_IF) & IRQ_TIMER0, IRQ_TIMER0);
+    }
+
+    #[test]
+    fn count_up_timer_advances_from_previous_overflows() {
+        let mut emu = Emulator::new();
+
+        emu.write_io_u16(REG_TM0CNT_L, 0xffff);
+        emu.write_io_u16(REG_TM0CNT_H, 0x0080);
+        emu.write_io_u16(0x104, 0xfffe);
+        emu.write_io_u16(0x106, 0x00c4);
+
+        emu.advance_time(2);
+
+        assert_eq!(emu.read_u16_mapped(0x0400_0100), 0xffff);
+        assert_eq!(emu.read_u16_mapped(0x0400_0104), 0xfffe);
+        assert_eq!(emu.io_read_u16_raw(REG_IF) & IRQ_TIMER1, IRQ_TIMER1);
     }
 }
