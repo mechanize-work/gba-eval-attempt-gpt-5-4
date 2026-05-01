@@ -57,25 +57,25 @@ impl Default for AudioOutputParams {
         Self {
             deadzone: 0,
             input_filter_cur: 136,
-            input_filter_prev: -14,
-            prefilter_gain_num: 134,
+            input_filter_prev: -16,
+            prefilter_gain_num: 135,
             compress_threshold_positive: 2_320,
             compress_threshold_negative: 2_100,
             compress_num_positive: 128,
-            compress_num_negative: 128,
-            positive_bias: 75,
-            negative_bias: 79,
+            compress_num_negative: 127,
+            positive_bias: 71,
+            negative_bias: 76,
             post_filter_cur: 136,
             post_filter_prev: -8,
-            post_filter_prev2: 4,
-            post_filter_positive_bias: 2,
-            post_filter_negative_bias: -10,
-            sign_hysteresis: 24,
+            post_filter_prev2: 6,
+            post_filter_positive_bias: 3,
+            post_filter_negative_bias: -7,
+            sign_hysteresis: 32,
             final_filter_cur: 127,
             final_filter_prev: 0,
             final_filter_prev2: 4,
             final_filter_prev3: -8,
-            final_nonzero_bias: 3,
+            final_nonzero_bias: 1,
         }
     }
 }
@@ -86,6 +86,7 @@ struct Dataset {
     prefilter: Vec<i16>,
     reference: Vec<i16>,
     reference_first_nonzero_pair: usize,
+    reference_peak: i32,
 }
 
 #[derive(Clone)]
@@ -93,6 +94,7 @@ struct CandidateScore {
     total_rmse: f64,
     rmses: Vec<f64>,
     first_nonzero_pairs: Vec<usize>,
+    peaks: Vec<i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -225,6 +227,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mut max_first_regression = 0.01f64;
+    let mut max_peak_overage: Option<i32> = None;
     let mut require_first_nonzero_match = false;
     let mut raw_pair_input = false;
     let mut start_params = AudioOutputParams::default();
@@ -242,6 +245,18 @@ fn run() -> Result<(), String> {
                 if max_first_regression < 0.0 {
                     return Err("regression value must be nonnegative".to_string());
                 }
+            }
+            "--max-peak-overage" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing peak overage value".to_string())?;
+                let parsed = value
+                    .parse::<i32>()
+                    .map_err(|_| "peak overage value must be an integer".to_string())?;
+                if parsed < 0 {
+                    return Err("peak overage value must be nonnegative".to_string());
+                }
+                max_peak_overage = Some(parsed);
             }
             "--require-first-nonzero-match" => require_first_nonzero_match = true,
             "--raw-pair-input" => raw_pair_input = true,
@@ -346,7 +361,7 @@ fn run() -> Result<(), String> {
 
     if positional.len() < 2 || positional.len() % 2 != 0 {
         return Err(
-            "usage: tune_audio [--max-first-regression value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
+            "usage: tune_audio [--max-first-regression value] [--max-peak-overage value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
                 .to_string(),
         );
     }
@@ -369,6 +384,7 @@ fn run() -> Result<(), String> {
             prefilter: prefilter_channel[..len].to_vec(),
             reference: reference_channel[..len].to_vec(),
             reference_first_nonzero_pair: first_nonzero_pair(&reference_channel[..len]),
+            reference_peak: peak_abs(&reference_channel[..len]),
         });
     }
 
@@ -381,6 +397,7 @@ fn run() -> Result<(), String> {
         baseline_params,
         &baseline,
         max_first_regression,
+        max_peak_overage,
         require_first_nonzero_match,
         raw_pair_input,
     );
@@ -405,10 +422,13 @@ fn search(
     start: AudioOutputParams,
     baseline: &CandidateScore,
     max_first_regression: f64,
+    max_peak_overage: Option<i32>,
     require_first_nonzero_match: bool,
     raw_pair_input: bool,
 ) -> Option<(AudioOutputParams, CandidateScore)> {
-    let mut best = if require_first_nonzero_match && !matches_first_nonzero(datasets, baseline) {
+    let mut best = if (require_first_nonzero_match && !matches_first_nonzero(datasets, baseline))
+        || !matches_peak_overage(datasets, baseline, max_peak_overage)
+    {
         None
     } else {
         Some((start, baseline.clone()))
@@ -433,6 +453,7 @@ fn search(
                     datasets,
                     baseline,
                     max_first_regression,
+                    max_peak_overage,
                     require_first_nonzero_match,
                     raw_pair_input,
                     candidate,
@@ -452,6 +473,7 @@ fn search(
                             datasets,
                             baseline,
                             max_first_regression,
+                            max_peak_overage,
                             require_first_nonzero_match,
                             raw_pair_input,
                             candidate,
@@ -488,6 +510,7 @@ fn consider_candidate(
     datasets: &[Dataset],
     baseline: &CandidateScore,
     max_first_regression: f64,
+    max_peak_overage: Option<i32>,
     require_first_nonzero_match: bool,
     raw_pair_input: bool,
     params: AudioOutputParams,
@@ -498,6 +521,9 @@ fn consider_candidate(
         return;
     }
     if require_first_nonzero_match && !matches_first_nonzero(datasets, &score) {
+        return;
+    }
+    if !matches_peak_overage(datasets, &score, max_peak_overage) {
         return;
     }
     match best {
@@ -519,24 +545,38 @@ fn matches_first_nonzero(datasets: &[Dataset], score: &CandidateScore) -> bool {
         .all(|(pair, dataset)| *pair == dataset.reference_first_nonzero_pair)
 }
 
+fn matches_peak_overage(datasets: &[Dataset], score: &CandidateScore, max_peak_overage: Option<i32>) -> bool {
+    let Some(max_peak_overage) = max_peak_overage else {
+        return true;
+    };
+    score
+        .peaks
+        .iter()
+        .zip(datasets.iter())
+        .all(|(peak, dataset)| *peak <= dataset.reference_peak + max_peak_overage)
+}
+
 fn score_candidate(datasets: &[Dataset], params: AudioOutputParams, raw_pair_input: bool) -> CandidateScore {
     let mut total = 0.0;
     let mut rmses = Vec::with_capacity(datasets.len());
     let mut first_nonzero_pairs = Vec::with_capacity(datasets.len());
+    let mut peaks = Vec::with_capacity(datasets.len());
     for dataset in datasets {
-        let (rmse, first_nonzero_pair) = evaluate_dataset(dataset, params, raw_pair_input);
+        let (rmse, first_nonzero_pair, peak) = evaluate_dataset(dataset, params, raw_pair_input);
         total += rmse;
         rmses.push(rmse);
         first_nonzero_pairs.push(first_nonzero_pair);
+        peaks.push(peak);
     }
     CandidateScore {
         total_rmse: total,
         rmses,
         first_nonzero_pairs,
+        peaks,
     }
 }
 
-fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams, raw_pair_input: bool) -> (f64, usize) {
+fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams, raw_pair_input: bool) -> (f64, usize, i32) {
     let mut input_history = 0i16;
     let mut delay_line = std::collections::VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1);
     let mut filter_history = [0i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1];
@@ -546,6 +586,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams, raw_pair_input
     let mut final_filter_history = [0i16; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1];
     let mut error_sum = 0u128;
     let mut first_nonzero_pair = dataset.reference.len();
+    let mut peak = 0i32;
 
     for (idx, (&scaled, &reference)) in dataset
         .prefilter
@@ -577,6 +618,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams, raw_pair_input
         if output != 0 && first_nonzero_pair == dataset.reference.len() {
             first_nonzero_pair = idx;
         }
+        peak = peak.max(i32::from(output).abs());
         let error = i64::from(output) - i64::from(reference);
         error_sum += (error * error) as u128;
     }
@@ -584,6 +626,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams, raw_pair_input
     (
         (error_sum as f64 / dataset.reference.len() as f64).sqrt(),
         first_nonzero_pair,
+        peak,
     )
 }
 
@@ -707,14 +750,20 @@ fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], sco
         params.final_nonzero_bias,
         score.total_rmse
     );
-    for ((dataset, rmse), first_nonzero_pair) in datasets
+    for (((dataset, rmse), first_nonzero_pair), peak) in datasets
         .iter()
         .zip(score.rmses.iter())
         .zip(score.first_nonzero_pairs.iter())
+        .zip(score.peaks.iter())
     {
         println!(
-            "  rmse {:.6} first_nonzero={} ref={} {}",
-            rmse, first_nonzero_pair, dataset.reference_first_nonzero_pair, dataset.label
+            "  rmse {:.6} first_nonzero={} ref={} peak={} ref_peak={} {}",
+            rmse,
+            first_nonzero_pair,
+            dataset.reference_first_nonzero_pair,
+            peak,
+            dataset.reference_peak,
+            dataset.label
         );
     }
 }
@@ -810,6 +859,10 @@ fn first_nonzero_pair(samples: &[i16]) -> usize {
         .iter()
         .position(|sample| *sample != 0)
         .unwrap_or(samples.len())
+}
+
+fn peak_abs(samples: &[i16]) -> i32 {
+    samples.iter().map(|sample| i32::from(*sample).abs()).max().unwrap_or(0)
 }
 
 fn round_divide(value: i32, denominator: i32) -> i32 {
