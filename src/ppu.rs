@@ -1,10 +1,19 @@
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Layer {
+    Backdrop,
+    Bg(u8),
+    Obj,
+}
+
 #[derive(Clone, Copy)]
 struct Pixel {
     color: u16,
     priority: u8,
     order: u8,
+    layer: Layer,
+    semi_transparent: bool,
 }
 
 pub(crate) fn render_framebuffer(
@@ -24,11 +33,14 @@ pub(crate) fn render_framebuffer(
 
     for y in 0..SCREEN_HEIGHT {
         for x in 0..SCREEN_WIDTH {
-            let mut best = Pixel {
+            let backdrop = Pixel {
                 color: read_palette_color(palette, 0),
                 priority: 4,
                 order: 0xff,
+                layer: Layer::Backdrop,
+                semi_transparent: false,
             };
+            let mut top = [backdrop; 2];
 
             match mode {
                 0 => {
@@ -37,7 +49,7 @@ pub(crate) fn render_framebuffer(
                             continue;
                         }
                         if let Some(pixel) = render_regular_bg_pixel(bg, x as i32, y as i32, io, palette, vram) {
-                            best = choose_pixel(best, pixel);
+                            top = insert_pixel(top, pixel);
                         }
                     }
                 }
@@ -47,28 +59,28 @@ pub(crate) fn render_framebuffer(
                             continue;
                         }
                         if let Some(pixel) = render_regular_bg_pixel(bg, x as i32, y as i32, io, palette, vram) {
-                            best = choose_pixel(best, pixel);
+                            top = insert_pixel(top, pixel);
                         }
                     }
                 }
                 3 => {
                     if dispcnt & (1 << 10) != 0 {
                         if let Some(pixel) = render_mode3_pixel(x, y, io, vram) {
-                            best = choose_pixel(best, pixel);
+                            top = insert_pixel(top, pixel);
                         }
                     }
                 }
                 4 => {
                     if dispcnt & (1 << 10) != 0 {
                         if let Some(pixel) = render_mode4_pixel(x, y, io, palette, vram, dispcnt) {
-                            best = choose_pixel(best, pixel);
+                            top = insert_pixel(top, pixel);
                         }
                     }
                 }
                 5 => {
                     if dispcnt & (1 << 10) != 0 {
                         if let Some(pixel) = render_mode5_pixel(x, y, io, vram, dispcnt) {
-                            best = choose_pixel(best, pixel);
+                            top = insert_pixel(top, pixel);
                         }
                     }
                 }
@@ -77,23 +89,105 @@ pub(crate) fn render_framebuffer(
 
             if obj_enabled {
                 if let Some(pixel) = render_obj_pixel(x as i32, y as i32, dispcnt, palette, vram, oam) {
-                    best = choose_pixel(best, pixel);
+                    top = insert_pixel(top, pixel);
                 }
             }
 
-            out[y * SCREEN_WIDTH + x] = bgr555_to_abgr(best.color);
+            out[y * SCREEN_WIDTH + x] = bgr555_to_abgr(apply_color_effect(io, top[0], top[1]));
         }
     }
 }
 
-fn choose_pixel(current: Pixel, candidate: Pixel) -> Pixel {
-    if candidate.priority < current.priority
-        || (candidate.priority == current.priority && candidate.order < current.order)
-    {
-        candidate
-    } else {
-        current
+fn pixel_before(lhs: Pixel, rhs: Pixel) -> bool {
+    lhs.priority < rhs.priority || (lhs.priority == rhs.priority && lhs.order < rhs.order)
+}
+
+fn insert_pixel(mut top: [Pixel; 2], candidate: Pixel) -> [Pixel; 2] {
+    if pixel_before(candidate, top[0]) {
+        top[1] = top[0];
+        top[0] = candidate;
+    } else if pixel_before(candidate, top[1]) {
+        top[1] = candidate;
     }
+    top
+}
+
+fn apply_color_effect(io: &[u8], primary: Pixel, secondary: Pixel) -> u16 {
+    let bldcnt = read_u16(io, 0x050);
+    let effect = ((bldcnt >> 6) & 0x3) as u8;
+    let first_targets = bldcnt & 0x003f;
+    let second_targets = (bldcnt >> 8) & 0x003f;
+    let primary_mask = layer_mask(primary.layer);
+    let secondary_mask = layer_mask(secondary.layer);
+    let alpha_enabled = primary.semi_transparent || effect == 1;
+
+    if alpha_enabled
+        && (primary.semi_transparent || primary_mask & first_targets != 0)
+        && secondary_mask & second_targets != 0
+    {
+        let bldalpha = read_u16(io, 0x052);
+        let eva = ((bldalpha & 0x1f).min(16)) as u8;
+        let evb = (((bldalpha >> 8) & 0x1f).min(16)) as u8;
+        return alpha_blend(primary.color, secondary.color, eva, evb);
+    }
+
+    if primary_mask & first_targets == 0 || primary.semi_transparent {
+        return primary.color;
+    }
+
+    let evy = ((read_u16(io, 0x054) & 0x1f).min(16)) as u8;
+    match effect {
+        2 => brighten(primary.color, evy),
+        3 => darken(primary.color, evy),
+        _ => primary.color,
+    }
+}
+
+fn layer_mask(layer: Layer) -> u16 {
+    match layer {
+        Layer::Bg(0) => 1 << 0,
+        Layer::Bg(1) => 1 << 1,
+        Layer::Bg(2) => 1 << 2,
+        Layer::Bg(3) => 1 << 3,
+        Layer::Obj => 1 << 4,
+        Layer::Backdrop => 1 << 5,
+        Layer::Bg(_) => 0,
+    }
+}
+
+fn alpha_blend(primary: u16, secondary: u16, eva: u8, evb: u8) -> u16 {
+    blend_channels(primary, secondary, eva, evb, |a, b, x, y| ((a * x + b * y) >> 4).min(31))
+}
+
+fn brighten(color: u16, evy: u8) -> u16 {
+    brighten_or_darken(color, evy, |channel, y| channel + (((31 - channel) * y) >> 4))
+}
+
+fn darken(color: u16, evy: u8) -> u16 {
+    brighten_or_darken(color, evy, |channel, y| channel - ((channel * y) >> 4))
+}
+
+fn blend_channels<F>(primary: u16, secondary: u16, eva: u8, evb: u8, mut f: F) -> u16
+where
+    F: FnMut(u16, u16, u16, u16) -> u16,
+{
+    let eva = eva as u16;
+    let evb = evb as u16;
+    let r = f(primary & 0x1f, secondary & 0x1f, eva, evb);
+    let g = f((primary >> 5) & 0x1f, (secondary >> 5) & 0x1f, eva, evb);
+    let b = f((primary >> 10) & 0x1f, (secondary >> 10) & 0x1f, eva, evb);
+    r | (g << 5) | (b << 10)
+}
+
+fn brighten_or_darken<F>(color: u16, evy: u8, mut f: F) -> u16
+where
+    F: FnMut(u16, u16) -> u16,
+{
+    let evy = evy as u16;
+    let r = f(color & 0x1f, evy).min(31);
+    let g = f((color >> 5) & 0x1f, evy).min(31);
+    let b = f((color >> 10) & 0x1f, evy).min(31);
+    r | (g << 5) | (b << 10)
 }
 
 fn render_mode3_pixel(x: usize, y: usize, io: &[u8], vram: &[u8]) -> Option<Pixel> {
@@ -104,6 +198,8 @@ fn render_mode3_pixel(x: usize, y: usize, io: &[u8], vram: &[u8]) -> Option<Pixe
         color,
         priority,
         order: 4,
+        layer: Layer::Bg(2),
+        semi_transparent: false,
     })
 }
 
@@ -117,6 +213,8 @@ fn render_mode4_pixel(x: usize, y: usize, io: &[u8], palette: &[u8], vram: &[u8]
         color,
         priority,
         order: 4,
+        layer: Layer::Bg(2),
+        semi_transparent: false,
     })
 }
 
@@ -132,6 +230,8 @@ fn render_mode5_pixel(x: usize, y: usize, io: &[u8], vram: &[u8], dispcnt: u16) 
         color,
         priority,
         order: 4,
+        layer: Layer::Bg(2),
+        semi_transparent: false,
     })
 }
 
@@ -204,6 +304,8 @@ fn render_regular_bg_pixel(
         color: read_palette_color(palette, palette_index),
         priority,
         order: 1 + bg as u8,
+        layer: Layer::Bg(bg as u8),
+        semi_transparent: false,
     })
 }
 
@@ -232,10 +334,14 @@ fn render_obj_pixel(
 
         let affine = attr0 & (1 << 8) != 0;
         let double_or_disable = attr0 & (1 << 9) != 0;
+        let obj_mode = (attr0 >> 10) & 0x3;
         if !affine && double_or_disable {
             continue;
         }
         if affine {
+            continue;
+        }
+        if obj_mode == 2 {
             continue;
         }
 
@@ -293,9 +399,17 @@ fn render_obj_pixel(
             color: read_palette_color(palette, palette_index),
             priority,
             order: 0,
+            layer: Layer::Obj,
+            semi_transparent: obj_mode == 1,
         };
         best = Some(match best {
-            Some(current) => choose_pixel(current, pixel),
+            Some(current) => {
+                if pixel_before(pixel, current) {
+                    pixel
+                } else {
+                    current
+                }
+            }
             None => pixel,
         });
     }
@@ -348,4 +462,16 @@ fn bgr555_to_abgr(color: u16) -> u32 {
     let g = (g5 << 3) | (g5 >> 2);
     let b = (b5 << 3) | (b5 >> 2);
     0xff00_0000 | (b << 16) | (g << 8) | r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::alpha_blend;
+
+    #[test]
+    fn alpha_blend_can_fully_select_the_secondary_color() {
+        let primary = 0x001f;
+        let secondary = 0x7c00;
+        assert_eq!(alpha_blend(primary, secondary, 0, 16), secondary);
+    }
 }

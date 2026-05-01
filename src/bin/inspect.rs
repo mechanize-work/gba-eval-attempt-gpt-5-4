@@ -178,6 +178,7 @@ fn run() -> Result<(), String> {
 
     println!("frames={frames}");
     println!("pc=0x{:08x}", emu.pc());
+    println!("cpsr=0x{:08x}", emu.cpsr());
     println!("thumb={}", emu.thumb());
     println!("halted={}", emu.halted());
     println!("stopped={}", emu.stopped());

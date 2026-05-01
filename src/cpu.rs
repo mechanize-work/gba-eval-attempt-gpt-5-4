@@ -97,8 +97,24 @@ impl Cpu {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn cpsr(&self) -> u32 {
+        self.cpsr
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn registers(&self) -> [u32; 16] {
         self.regs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_set_state(&mut self, cpsr: u32, pc: u32) {
+        self.set_cpsr_raw(cpsr);
+        self.regs[15] = pc;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_reg(&self, index: usize) -> u32 {
+        self.regs[index]
     }
 
     pub(crate) fn mode(&self) -> Mode {
@@ -393,7 +409,7 @@ impl Emulator {
             return 1;
         }
 
-        if instr & 0x0fbf_fff0 == 0x0129_f000 {
+        if instr & 0x0db0_fff0 == 0x0120_f000 {
             let rm = (instr & 0xf) as usize;
             let value = self.cpu.read_reg(rm, pc, false);
             let spsr = instr & (1 << 22) != 0;
@@ -412,7 +428,7 @@ impl Emulator {
             return 1;
         }
 
-        if instr & 0x0fbf_f000 == 0x0328_f000 {
+        if instr & 0x0db0_f000 == 0x0320_f000 {
             let imm = arm_expand_immediate(instr, self.cpu.carry()).0;
             let spsr = instr & (1 << 22) != 0;
             let fields = (instr >> 16) & 0xf;
@@ -1484,6 +1500,13 @@ mod tests {
         emu
     }
 
+    fn arm_emu(pc: u32, mode: Mode) -> Emulator {
+        let mut emu = Emulator::new();
+        emu.cpu.set_cpsr_raw(mode as u32);
+        emu.cpu.regs[15] = pc;
+        emu
+    }
+
     #[test]
     fn thumb_bx_uses_the_declared_source_register() {
         let mut emu = thumb_emu(0x0300_0000);
@@ -1530,5 +1553,25 @@ mod tests {
         assert_eq!(second_cycles, 3);
         assert_eq!(emu.cpu.pc(), 0x0801_37c0);
         assert_eq!(emu.cpu.regs[14], 0x0800_017d);
+    }
+
+    #[test]
+    fn arm_msr_register_updates_the_requested_control_fields() {
+        let mut emu = arm_emu(0x0300_0000, Mode::Supervisor);
+        emu.cpu.regs[11] = 0x0000_009f; // System mode with IRQ disabled.
+        emu.cpu.bank_usr_r13_r14 = [0x0300_7ea8, 0x0800_1234];
+        emu.cpu.regs[13] = 0x0300_7fa0;
+        emu.cpu.regs[14] = 0x0800_5678;
+        emu.iwram[0x0000..0x0004].copy_from_slice(&0xe121_f00bu32.to_le_bytes()); // msr cpsr_c, fp
+
+        let cycles = emu.step_cpu();
+
+        assert_eq!(cycles, 1);
+        assert_eq!(emu.cpu.mode(), Mode::System);
+        assert!(!emu.cpu.thumb());
+        assert_eq!(emu.cpu.pc(), 0x0300_0004);
+        assert_eq!(emu.cpu.regs[13], 0x0300_7ea8);
+        assert_eq!(emu.cpu.regs[14], 0x0800_1234);
+        assert_eq!(emu.cpu.bank_svc_r13_r14, [0x0300_7fa0, 0x0800_5678]);
     }
 }

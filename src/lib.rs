@@ -179,13 +179,15 @@ impl Emulator {
             }
 
             if self.stopped {
-                self.advance_time(cycles);
-                break;
+                let used = self.advance_time_internal(cycles, true);
+                cycles = cycles.saturating_sub(used);
+                continue;
             }
 
             if self.halted {
-                self.advance_time(cycles);
-                break;
+                let used = self.advance_time_internal(cycles, true);
+                cycles = cycles.saturating_sub(used);
+                continue;
             }
 
             let used = self.step_cpu().max(1);
@@ -228,7 +230,12 @@ impl Emulator {
         }
     }
 
-    fn advance_time(&mut self, mut cycles: u32) {
+    fn advance_time(&mut self, cycles: u32) {
+        self.advance_time_internal(cycles, false);
+    }
+
+    fn advance_time_internal(&mut self, mut cycles: u32, stop_on_wakeup: bool) -> u32 {
+        let original = cycles;
         while cycles > 0 {
             let line = self.frame_cycle / CYCLES_PER_LINE;
             let line_cycle = self.frame_cycle % CYCLES_PER_LINE;
@@ -256,20 +263,27 @@ impl Emulator {
                 let new_line = self.frame_cycle / CYCLES_PER_LINE;
                 self.on_line_start(new_line);
             }
+
+            if stop_on_wakeup && !self.halted && !self.stopped {
+                break;
+            }
         }
+        original - cycles
     }
 
     fn on_line_start(&mut self, line: u32) {
         if line == VISIBLE_LINES {
             ppu::render_framebuffer(&self.io, &self.palette, &self.vram, &self.oam, &mut self.framebuffer);
             self.run_dma_timing(DmaTiming::VBlank);
-            self.raise_interrupt(IRQ_VBLANK);
+            if self.io_read_u16_raw(REG_DISPSTAT) & (1 << 3) != 0 {
+                self.raise_interrupt(IRQ_VBLANK);
+            }
         }
 
         let dispstat = self.io_read_u16_raw(REG_DISPSTAT) & !0x0007;
         self.io_write_u16_raw(REG_DISPSTAT, dispstat);
 
-        if line == self.vcount_target() as u32 {
+        if line == self.vcount_target() as u32 && self.io_read_u16_raw(REG_DISPSTAT) & (1 << 5) != 0 {
             self.raise_interrupt(IRQ_VCOUNT);
         }
 
@@ -279,7 +293,9 @@ impl Emulator {
     fn on_hblank_start(&mut self, line: u32) {
         if line < VISIBLE_LINES {
             self.run_dma_timing(DmaTiming::HBlank);
-            self.raise_interrupt(IRQ_HBLANK);
+            if self.io_read_u16_raw(REG_DISPSTAT) & (1 << 4) != 0 {
+                self.raise_interrupt(IRQ_HBLANK);
+            }
         }
         self.poll_halt_wakeup();
     }
@@ -814,6 +830,10 @@ impl NativeEmulator {
         self.inner.cpu.pc()
     }
 
+    pub fn cpsr(&self) -> u32 {
+        self.inner.cpu.cpsr()
+    }
+
     pub fn thumb(&self) -> bool {
         self.inner.cpu.thumb()
     }
@@ -970,5 +990,25 @@ mod tests {
         emu.run_frame();
         assert_ne!(emu.cpu.pc(), 0);
         assert_eq!(emu.framebuffer.len(), SCREEN_WIDTH * SCREEN_HEIGHT);
+    }
+
+    #[test]
+    fn halted_cpu_resumes_execution_after_hblank_wakeup() {
+        let mut emu = Emulator::new();
+        emu.cpu
+            .debug_set_state((Mode::System as u32) | (1 << 5), 0x0300_0000);
+        emu.iwram[0x0000..0x0004].copy_from_slice(&[0x01, 0x20, 0x02, 0x21]); // movs r0,#1; movs r1,#2
+        emu.io_write_u16_raw(REG_IE, IRQ_HBLANK);
+        emu.io_write_u16_raw(REG_DISPSTAT, 1 << 4);
+        emu.halted = true;
+        emu.frame_cycle = HDRAW_CYCLES - 1;
+
+        emu.run_cycles(3);
+
+        assert!(!emu.halted);
+        assert_eq!(emu.cpu.debug_reg(0), 1);
+        assert_eq!(emu.cpu.debug_reg(1), 2);
+        assert_eq!(emu.cpu.pc(), 0x0300_0004);
+        assert_eq!(emu.io_read_u16_raw(REG_IF) & IRQ_HBLANK, IRQ_HBLANK);
     }
 }
