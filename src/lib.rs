@@ -74,7 +74,9 @@ const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 69;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN: u32 = 256;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_NUM: u32 = 1;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_DEN: u32 = 1;
-const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 73;
+const AUDIO_CAPTURE_DEFAULT_SHAPE_NUM: u32 = 95;
+const AUDIO_CAPTURE_DEFAULT_SHAPE_DEN: u32 = 96;
+const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 75;
 const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 256;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
@@ -327,7 +329,7 @@ impl Emulator {
             audio_pair_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
-            audio_capture_mode: AudioCaptureMode::PointSegmentLinearBlend,
+            audio_capture_mode: AudioCaptureMode::PointSegmentHybridBlend,
             audio_mix_mode: AudioMixMode::Legacy,
             audio_output_params: AudioOutputParams::default(),
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
@@ -342,8 +344,8 @@ impl Emulator {
             audio_capture_window_start_den: AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN,
             audio_capture_window_num: AUDIO_CAPTURE_DEFAULT_WINDOW_NUM,
             audio_capture_window_den: AUDIO_CAPTURE_DEFAULT_WINDOW_DEN,
-            audio_capture_shape_num: 1,
-            audio_capture_shape_den: 1,
+            audio_capture_shape_num: AUDIO_CAPTURE_DEFAULT_SHAPE_NUM,
+            audio_capture_shape_den: AUDIO_CAPTURE_DEFAULT_SHAPE_DEN,
             audio_capture_blend_num: AUDIO_CAPTURE_DEFAULT_BLEND_NUM,
             audio_capture_blend_den: AUDIO_CAPTURE_DEFAULT_BLEND_DEN,
             audio_capture_midpoint_left: 0,
