@@ -217,15 +217,18 @@ fn run() -> Result<(), String> {
     let baseline = score_candidate(&datasets, baseline_params);
     print_score("baseline", baseline_params, &datasets, &baseline);
 
-    let best_params = search(
+    let best = search(
         &datasets,
         baseline_params,
         &baseline,
         max_first_regression,
         require_first_nonzero_match,
     );
-    let best_score = score_candidate(&datasets, best_params);
-    print_score("best", best_params, &datasets, &best_score);
+    if let Some((best_params, best_score)) = best {
+        print_score("best", best_params, &datasets, &best_score);
+    } else {
+        println!("no_candidate_matching_first_nonzero=true");
+    }
 
     Ok(())
 }
@@ -243,21 +246,27 @@ fn search(
     baseline: &CandidateScore,
     max_first_regression: f64,
     require_first_nonzero_match: bool,
-) -> AudioOutputParams {
-    let mut best_params = start;
-    let mut best_score = baseline.clone();
+) -> Option<(AudioOutputParams, CandidateScore)> {
+    let mut best = if require_first_nonzero_match && !matches_first_nonzero(datasets, baseline) {
+        None
+    } else {
+        Some((start, baseline.clone()))
+    };
 
     loop {
         let mut improved = false;
-        let mut round_best_params = best_params;
-        let mut round_best_score = best_score.clone();
+        let mut round_best = best.clone();
+        let search_params = best
+            .as_ref()
+            .map(|(params, _)| *params)
+            .unwrap_or(start);
 
         for (i, first) in ParamKind::ALL.iter().enumerate() {
             for &first_delta in first.deltas() {
                 if first_delta == 0 {
                     continue;
                 }
-                let mut candidate = best_params;
+                let mut candidate = search_params;
                 first.apply(&mut candidate, first_delta);
                 consider_candidate(
                     datasets,
@@ -265,8 +274,7 @@ fn search(
                     max_first_regression,
                     require_first_nonzero_match,
                     candidate,
-                    &mut round_best_params,
-                    &mut round_best_score,
+                    &mut round_best,
                 );
             }
             for second in ParamKind::ALL.iter().skip(i + 1) {
@@ -275,7 +283,7 @@ fn search(
                         if first_delta == 0 && second_delta == 0 {
                             continue;
                         }
-                        let mut candidate = best_params;
+                        let mut candidate = search_params;
                         first.apply(&mut candidate, first_delta);
                         second.apply(&mut candidate, second_delta);
                         consider_candidate(
@@ -284,23 +292,31 @@ fn search(
                             max_first_regression,
                             require_first_nonzero_match,
                             candidate,
-                            &mut round_best_params,
-                            &mut round_best_score,
+                            &mut round_best,
                         );
                     }
                 }
             }
         }
 
-        if round_best_score.total_rmse + 1e-9 < best_score.total_rmse {
-            improved = true;
-            best_params = round_best_params;
-            best_score = round_best_score;
-            print_score("improved", best_params, datasets, &best_score);
+        match (&best, &round_best) {
+            (Some((_, best_score)), Some((round_best_params, round_best_score)))
+                if round_best_score.total_rmse + 1e-9 < best_score.total_rmse =>
+            {
+                improved = true;
+                best = Some((*round_best_params, round_best_score.clone()));
+                print_score("improved", *round_best_params, datasets, round_best_score);
+            }
+            (None, Some((round_best_params, round_best_score))) => {
+                improved = true;
+                best = Some((*round_best_params, round_best_score.clone()));
+                print_score("improved", *round_best_params, datasets, round_best_score);
+            }
+            _ => {}
         }
 
         if !improved {
-            return best_params;
+            return best;
         }
     }
 }
@@ -311,26 +327,32 @@ fn consider_candidate(
     max_first_regression: f64,
     require_first_nonzero_match: bool,
     params: AudioOutputParams,
-    best_params: &mut AudioOutputParams,
-    best_score: &mut CandidateScore,
+    best: &mut Option<(AudioOutputParams, CandidateScore)>,
 ) {
     let score = score_candidate(datasets, params);
     if score.rmses[0] > baseline.rmses[0] + max_first_regression {
         return;
     }
-    if require_first_nonzero_match
-        && score
-            .first_nonzero_pairs
-            .iter()
-            .zip(datasets.iter())
-            .any(|(pair, dataset)| *pair != dataset.reference_first_nonzero_pair)
-    {
+    if require_first_nonzero_match && !matches_first_nonzero(datasets, &score) {
         return;
     }
-    if score.total_rmse + 1e-9 < best_score.total_rmse {
-        *best_params = params;
-        *best_score = score;
+    match best {
+        Some((_, best_score)) if score.total_rmse + 1e-9 < best_score.total_rmse => {
+            *best = Some((params, score));
+        }
+        None => {
+            *best = Some((params, score));
+        }
+        _ => {}
     }
+}
+
+fn matches_first_nonzero(datasets: &[Dataset], score: &CandidateScore) -> bool {
+    score
+        .first_nonzero_pairs
+        .iter()
+        .zip(datasets.iter())
+        .all(|(pair, dataset)| *pair == dataset.reference_first_nonzero_pair)
 }
 
 fn score_candidate(datasets: &[Dataset], params: AudioOutputParams) -> CandidateScore {
