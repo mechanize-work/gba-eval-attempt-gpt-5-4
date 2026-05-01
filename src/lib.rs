@@ -78,12 +78,14 @@ const AUDIO_OUTPUT_COMPRESS_THRESHOLD: i32 = 2_380;
 const AUDIO_OUTPUT_COMPRESS_NUM: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 74;
-const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 67;
+const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 76;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 129;
-const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -1;
-const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 0;
+const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = 0;
+const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -1;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_POST_FILTER_BIAS: i32 = -1;
+const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = -1;
+const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -10;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -122,6 +124,7 @@ pub(crate) struct Emulator {
     audio_filter_history: [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     audio_post_history: i16,
     audio_post_history2: i16,
+    audio_last_nonzero_output: i16,
     active_dma_channel: Option<usize>,
     fifo_a: VecDeque<i8>,
     fifo_b: VecDeque<i8>,
@@ -180,6 +183,7 @@ impl Emulator {
             audio_filter_history: [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
             audio_post_history: 0,
             audio_post_history2: 0,
+            audio_last_nonzero_output: 0,
             active_dma_channel: None,
             fifo_a: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
             fifo_b: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
@@ -241,6 +245,7 @@ impl Emulator {
         self.audio_filter_history.fill(0);
         self.audio_post_history = 0;
         self.audio_post_history2 = 0;
+        self.audio_last_nonzero_output = 0;
         self.active_dma_channel = None;
         self.fifo_a.clear();
         self.fifo_b.clear();
@@ -431,12 +436,26 @@ impl Emulator {
             .clamp(i16::MIN as i32, i16::MAX as i32);
             self.audio_post_history2 = self.audio_post_history;
             self.audio_post_history = biased.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-            if post_filtered == 0 {
+            let mut output = if post_filtered == 0 {
                 0
-            } else {
-                (post_filtered + AUDIO_OUTPUT_POST_FILTER_BIAS)
+            } else if post_filtered > 0 {
+                (post_filtered + AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS)
                     .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            } else {
+                (post_filtered + AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS)
+                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            };
+            if self.audio_last_nonzero_output != 0
+                && output != 0
+                && (self.audio_last_nonzero_output > 0) != (output > 0)
+                && i32::from(output).abs() <= AUDIO_OUTPUT_SIGN_HYSTERESIS
+            {
+                output = 0;
             }
+            if output != 0 {
+                self.audio_last_nonzero_output = output;
+            }
+            output
         };
         (scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16, output)
     }
@@ -1738,7 +1757,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[858, 858, 1027, 1027, 978, 978, 1266, 1266, 1024, 1024, 1073, 1073, 1185, 1185, 1088, 1088, 1089, 1089]
+            &[858, 858, 1034, 1034, 979, 979, 1266, 1266, 1026, 1026, 1072, 1072, 1185, 1185, 1089, 1089, 1088, 1088]
         );
     }
 

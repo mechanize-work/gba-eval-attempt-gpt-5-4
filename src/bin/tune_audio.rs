@@ -14,6 +14,7 @@ const SEARCH_THR_DELTAS: [i32; 7] = [-80, -40, -20, 0, 20, 40, 80];
 const SEARCH_CNUM_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_BIAS_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_POST_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+const SEARCH_HYST_DELTAS: [i32; 9] = [-16, -8, -4, -2, 0, 2, 4, 8, 16];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AudioOutputParams {
@@ -25,7 +26,9 @@ struct AudioOutputParams {
     post_filter_cur: i32,
     post_filter_prev: i32,
     post_filter_prev2: i32,
-    post_filter_bias: i32,
+    post_filter_positive_bias: i32,
+    post_filter_negative_bias: i32,
+    sign_hysteresis: i32,
 }
 
 impl Default for AudioOutputParams {
@@ -36,11 +39,13 @@ impl Default for AudioOutputParams {
             compress_threshold: 2_380,
             compress_num: 127,
             positive_bias: 74,
-            negative_bias: 67,
+            negative_bias: 76,
             post_filter_cur: 129,
-            post_filter_prev: -1,
-            post_filter_prev2: 0,
-            post_filter_bias: -1,
+            post_filter_prev: 0,
+            post_filter_prev2: -1,
+            post_filter_positive_bias: -1,
+            post_filter_negative_bias: -10,
+            sign_hysteresis: 24,
         }
     }
 }
@@ -70,11 +75,13 @@ enum ParamKind {
     PostFilterCur,
     PostFilterPrev,
     PostFilterPrev2,
-    PostFilterBias,
+    PostFilterPositiveBias,
+    PostFilterNegativeBias,
+    SignHysteresis,
 }
 
 impl ParamKind {
-    const ALL: [ParamKind; 9] = [
+    const ALL: [ParamKind; 11] = [
         ParamKind::Deadzone,
         ParamKind::CompressThreshold,
         ParamKind::CompressNum,
@@ -83,7 +90,9 @@ impl ParamKind {
         ParamKind::PostFilterCur,
         ParamKind::PostFilterPrev,
         ParamKind::PostFilterPrev2,
-        ParamKind::PostFilterBias,
+        ParamKind::PostFilterPositiveBias,
+        ParamKind::PostFilterNegativeBias,
+        ParamKind::SignHysteresis,
     ];
 
     fn deltas(self) -> &'static [i32] {
@@ -92,10 +101,12 @@ impl ParamKind {
             ParamKind::CompressThreshold => &SEARCH_THR_DELTAS,
             ParamKind::CompressNum => &SEARCH_CNUM_DELTAS,
             ParamKind::PositiveBias | ParamKind::NegativeBias => &SEARCH_BIAS_DELTAS,
+            ParamKind::SignHysteresis => &SEARCH_HYST_DELTAS,
             ParamKind::PostFilterCur
             | ParamKind::PostFilterPrev
             | ParamKind::PostFilterPrev2
-            | ParamKind::PostFilterBias => {
+            | ParamKind::PostFilterPositiveBias
+            | ParamKind::PostFilterNegativeBias => {
                 &SEARCH_POST_DELTAS
             }
         }
@@ -113,7 +124,9 @@ impl ParamKind {
             ParamKind::PostFilterCur => params.post_filter_cur = (params.post_filter_cur + delta).clamp(120, 136),
             ParamKind::PostFilterPrev => params.post_filter_prev = (params.post_filter_prev + delta).clamp(-8, 8),
             ParamKind::PostFilterPrev2 => params.post_filter_prev2 = (params.post_filter_prev2 + delta).clamp(-8, 8),
-            ParamKind::PostFilterBias => params.post_filter_bias += delta,
+            ParamKind::PostFilterPositiveBias => params.post_filter_positive_bias += delta,
+            ParamKind::PostFilterNegativeBias => params.post_filter_negative_bias += delta,
+            ParamKind::SignHysteresis => params.sign_hysteresis = (params.sign_hysteresis + delta).max(0),
         }
     }
 }
@@ -177,9 +190,17 @@ fn run() -> Result<(), String> {
                 start_params.post_filter_prev2 =
                     parse_i32_arg(args.next(), "missing post-filter prev2 value")?.clamp(-8, 8);
             }
-            "--start-post-filter-bias" => {
-                start_params.post_filter_bias =
-                    parse_i32_arg(args.next(), "missing post-filter bias value")?;
+            "--start-post-filter-positive-bias" => {
+                start_params.post_filter_positive_bias =
+                    parse_i32_arg(args.next(), "missing post-filter positive bias value")?;
+            }
+            "--start-post-filter-negative-bias" => {
+                start_params.post_filter_negative_bias =
+                    parse_i32_arg(args.next(), "missing post-filter negative bias value")?;
+            }
+            "--start-sign-hysteresis" => {
+                start_params.sign_hysteresis =
+                    parse_i32_arg(args.next(), "missing sign hysteresis value")?.max(0);
             }
             _ => positional.push(arg),
         }
@@ -376,6 +397,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize
     let mut filter_history = [0i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1];
     let mut post_history = 0i16;
     let mut post_history2 = 0i16;
+    let mut last_nonzero_output = 0i16;
     let mut error_sum = 0u128;
     let mut first_nonzero_pair = dataset.reference.len();
 
@@ -390,6 +412,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize
             &mut filter_history,
             &mut post_history,
             &mut post_history2,
+            &mut last_nonzero_output,
             params,
         );
         if output != 0 && first_nonzero_pair == dataset.reference.len() {
@@ -410,6 +433,7 @@ fn filter_audio_sample(
     filter_history: &mut [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     post_history: &mut i16,
     post_history2: &mut i16,
+    last_nonzero_output: &mut i16,
     params: AudioOutputParams,
 ) -> i16 {
     let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
@@ -450,17 +474,31 @@ fn filter_audio_sample(
     .clamp(i16::MIN as i32, i16::MAX as i32);
     *post_history2 = *post_history;
     *post_history = biased.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    if post_filtered == 0 {
+    let mut output = if post_filtered == 0 {
         0
-    } else {
-        (post_filtered + params.post_filter_bias)
+    } else if post_filtered > 0 {
+        (post_filtered + params.post_filter_positive_bias)
             .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    } else {
+        (post_filtered + params.post_filter_negative_bias)
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    };
+    if *last_nonzero_output != 0
+        && output != 0
+        && (*last_nonzero_output > 0) != (output > 0)
+        && i32::from(output).abs() <= params.sign_hysteresis
+    {
+        output = 0;
     }
+    if output != 0 {
+        *last_nonzero_output = output;
+    }
+    output
 }
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} thr={} cnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_bias={} total_rmse={:.6}",
+        "{label} dead={} thr={} cnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} total_rmse={:.6}",
         params.deadzone,
         params.compress_threshold,
         params.compress_num,
@@ -469,7 +507,9 @@ fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], sco
         params.post_filter_cur,
         params.post_filter_prev,
         params.post_filter_prev2,
-        params.post_filter_bias,
+        params.post_filter_positive_bias,
+        params.post_filter_negative_bias,
+        params.sign_hysteresis,
         score.total_rmse
     );
     for ((dataset, rmse), first_nonzero_pair) in datasets
