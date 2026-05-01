@@ -8,6 +8,8 @@ const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [124, 9, -4, -1];
+const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_THR_DELTAS: [i32; 7] = [-80, -40, -20, 0, 20, 40, 80];
@@ -15,6 +17,7 @@ const SEARCH_CNUM_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_BIAS_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_POST_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_HYST_DELTAS: [i32; 9] = [-16, -8, -4, -2, 0, 2, 4, 8, 16];
+const SEARCH_FINAL_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AudioOutputParams {
@@ -31,6 +34,10 @@ struct AudioOutputParams {
     post_filter_positive_bias: i32,
     post_filter_negative_bias: i32,
     sign_hysteresis: i32,
+    final_filter_cur: i32,
+    final_filter_prev: i32,
+    final_filter_prev2: i32,
+    final_filter_prev3: i32,
 }
 
 impl Default for AudioOutputParams {
@@ -39,17 +46,21 @@ impl Default for AudioOutputParams {
         Self {
             deadzone: 5,
             compress_threshold_positive: 2_400,
-            compress_threshold_negative: 2_320,
+            compress_threshold_negative: 2_120,
             compress_num_positive: 127,
             compress_num_negative: 127,
-            positive_bias: 74,
+            positive_bias: 72,
             negative_bias: 76,
             post_filter_cur: 129,
             post_filter_prev: 1,
             post_filter_prev2: -2,
-            post_filter_positive_bias: -1,
-            post_filter_negative_bias: -10,
-            sign_hysteresis: 26,
+            post_filter_positive_bias: 0,
+            post_filter_negative_bias: -8,
+            sign_hysteresis: 24,
+            final_filter_cur: 124,
+            final_filter_prev: 9,
+            final_filter_prev2: -4,
+            final_filter_prev3: -1,
         }
     }
 }
@@ -84,10 +95,14 @@ enum ParamKind {
     PostFilterPositiveBias,
     PostFilterNegativeBias,
     SignHysteresis,
+    FinalFilterCur,
+    FinalFilterPrev,
+    FinalFilterPrev2,
+    FinalFilterPrev3,
 }
 
 impl ParamKind {
-    const ALL: [ParamKind; 13] = [
+    const ALL: [ParamKind; 17] = [
         ParamKind::Deadzone,
         ParamKind::CompressThresholdPositive,
         ParamKind::CompressThresholdNegative,
@@ -101,6 +116,10 @@ impl ParamKind {
         ParamKind::PostFilterPositiveBias,
         ParamKind::PostFilterNegativeBias,
         ParamKind::SignHysteresis,
+        ParamKind::FinalFilterCur,
+        ParamKind::FinalFilterPrev,
+        ParamKind::FinalFilterPrev2,
+        ParamKind::FinalFilterPrev3,
     ];
 
     fn deltas(self) -> &'static [i32] {
@@ -110,6 +129,10 @@ impl ParamKind {
             ParamKind::CompressNumPositive | ParamKind::CompressNumNegative => &SEARCH_CNUM_DELTAS,
             ParamKind::PositiveBias | ParamKind::NegativeBias => &SEARCH_BIAS_DELTAS,
             ParamKind::SignHysteresis => &SEARCH_HYST_DELTAS,
+            ParamKind::FinalFilterCur
+            | ParamKind::FinalFilterPrev
+            | ParamKind::FinalFilterPrev2
+            | ParamKind::FinalFilterPrev3 => &SEARCH_FINAL_DELTAS,
             ParamKind::PostFilterCur
             | ParamKind::PostFilterPrev
             | ParamKind::PostFilterPrev2
@@ -147,6 +170,10 @@ impl ParamKind {
             ParamKind::PostFilterPositiveBias => params.post_filter_positive_bias += delta,
             ParamKind::PostFilterNegativeBias => params.post_filter_negative_bias += delta,
             ParamKind::SignHysteresis => params.sign_hysteresis = (params.sign_hysteresis + delta).max(0),
+            ParamKind::FinalFilterCur => params.final_filter_cur = (params.final_filter_cur + delta).clamp(120, 128),
+            ParamKind::FinalFilterPrev => params.final_filter_prev = (params.final_filter_prev + delta).clamp(0, 16),
+            ParamKind::FinalFilterPrev2 => params.final_filter_prev2 = (params.final_filter_prev2 + delta).clamp(-8, 4),
+            ParamKind::FinalFilterPrev3 => params.final_filter_prev3 = (params.final_filter_prev3 + delta).clamp(-8, 4),
         }
     }
 }
@@ -241,6 +268,22 @@ fn run() -> Result<(), String> {
             "--start-sign-hysteresis" => {
                 start_params.sign_hysteresis =
                     parse_i32_arg(args.next(), "missing sign hysteresis value")?.max(0);
+            }
+            "--start-final-filter-cur" => {
+                start_params.final_filter_cur =
+                    parse_i32_arg(args.next(), "missing final-filter cur value")?.clamp(120, 128);
+            }
+            "--start-final-filter-prev" => {
+                start_params.final_filter_prev =
+                    parse_i32_arg(args.next(), "missing final-filter prev value")?.clamp(0, 16);
+            }
+            "--start-final-filter-prev2" => {
+                start_params.final_filter_prev2 =
+                    parse_i32_arg(args.next(), "missing final-filter prev2 value")?.clamp(-8, 4);
+            }
+            "--start-final-filter-prev3" => {
+                start_params.final_filter_prev3 =
+                    parse_i32_arg(args.next(), "missing final-filter prev3 value")?.clamp(-8, 4);
             }
             _ => positional.push(arg),
         }
@@ -438,6 +481,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize
     let mut post_history = 0i16;
     let mut post_history2 = 0i16;
     let mut last_nonzero_output = 0i16;
+    let mut final_filter_history = [0i16; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1];
     let mut error_sum = 0u128;
     let mut first_nonzero_pair = dataset.reference.len();
 
@@ -453,6 +497,7 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize
             &mut post_history,
             &mut post_history2,
             &mut last_nonzero_output,
+            &mut final_filter_history,
             params,
         );
         if output != 0 && first_nonzero_pair == dataset.reference.len() {
@@ -474,6 +519,7 @@ fn filter_audio_sample(
     post_history: &mut i16,
     post_history2: &mut i16,
     last_nonzero_output: &mut i16,
+    final_filter_history: &mut [i16; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1],
     params: AudioOutputParams,
 ) -> i16 {
     let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
@@ -536,12 +582,21 @@ fn filter_audio_sample(
     if output != 0 {
         *last_nonzero_output = output;
     }
-    output
+    let mut final_accum = params.final_filter_cur * i32::from(output);
+    final_accum += params.final_filter_prev * i32::from(final_filter_history[0]);
+    final_accum += params.final_filter_prev2 * i32::from(final_filter_history[1]);
+    final_accum += params.final_filter_prev3 * i32::from(final_filter_history[2]);
+    let corrected_output =
+        round_divide(final_accum, AUDIO_OUTPUT_FINAL_FILTER_DEN).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let history_len = final_filter_history.len();
+    final_filter_history.copy_within(0..history_len - 1, 1);
+    final_filter_history[0] = output;
+    corrected_output
 }
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} total_rmse={:.6}",
+        "{label} dead={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} total_rmse={:.6}",
         params.deadzone,
         params.compress_threshold_positive,
         params.compress_threshold_negative,
@@ -555,6 +610,10 @@ fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], sco
         params.post_filter_positive_bias,
         params.post_filter_negative_bias,
         params.sign_hysteresis,
+        params.final_filter_cur,
+        params.final_filter_prev,
+        params.final_filter_prev2,
+        params.final_filter_prev3,
         score.total_rmse
     );
     for ((dataset, rmse), first_nonzero_pair) in datasets

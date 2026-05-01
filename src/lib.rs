@@ -75,19 +75,21 @@ const AUDIO_OUTPUT_DEADZONE: i32 = 5;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_400;
-const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_320;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_120;
 const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
-const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 74;
+const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 72;
 const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 76;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 129;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = 1;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -2;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = -1;
-const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -10;
-const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 26;
+const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 0;
+const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -8;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 24;
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [124, 9, -4, -1];
+const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -127,6 +129,7 @@ pub(crate) struct Emulator {
     audio_post_history: i16,
     audio_post_history2: i16,
     audio_last_nonzero_output: i16,
+    audio_final_filter_history: [i16; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1],
     active_dma_channel: Option<usize>,
     fifo_a: VecDeque<i8>,
     fifo_b: VecDeque<i8>,
@@ -186,6 +189,7 @@ impl Emulator {
             audio_post_history: 0,
             audio_post_history2: 0,
             audio_last_nonzero_output: 0,
+            audio_final_filter_history: [0; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1],
             active_dma_channel: None,
             fifo_a: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
             fifo_b: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
@@ -248,6 +252,7 @@ impl Emulator {
         self.audio_post_history = 0;
         self.audio_post_history2 = 0;
         self.audio_last_nonzero_output = 0;
+        self.audio_final_filter_history.fill(0);
         self.active_dma_channel = None;
         self.fifo_a.clear();
         self.fifo_b.clear();
@@ -411,7 +416,7 @@ impl Emulator {
         self.audio_filter_history.copy_within(0..history_len - 1, 1);
         self.audio_filter_history[0] = scaled;
         let clamped = filtered.clamp(i16::MIN as i32, i16::MAX as i32);
-        let output = if clamped.abs() <= AUDIO_OUTPUT_DEADZONE {
+        let raw_output = if clamped.abs() <= AUDIO_OUTPUT_DEADZONE {
             0
         } else {
             let gained = Self::round_divide(clamped * AUDIO_OUTPUT_POST_GAIN_NUM, AUDIO_OUTPUT_POST_GAIN_DEN)
@@ -468,7 +473,21 @@ impl Emulator {
             }
             output
         };
-        (scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16, output)
+        let mut final_accum = AUDIO_OUTPUT_FINAL_FILTER_TAPS[0] * i32::from(raw_output);
+        for (tap, history) in AUDIO_OUTPUT_FINAL_FILTER_TAPS[1..]
+            .iter()
+            .zip(self.audio_final_filter_history.iter())
+        {
+            final_accum += *tap * i32::from(*history);
+        }
+        let corrected_output =
+            Self::round_divide(final_accum, AUDIO_OUTPUT_FINAL_FILTER_DEN).clamp(i16::MIN as i32, i16::MAX as i32)
+                as i16;
+        let final_history_len = self.audio_final_filter_history.len();
+        self.audio_final_filter_history
+            .copy_within(0..final_history_len - 1, 1);
+        self.audio_final_filter_history[0] = raw_output;
+        (scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16, corrected_output)
     }
 
     fn round_divide(value: i32, denominator: i32) -> i32 {
@@ -1768,7 +1787,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[858, 858, 1041, 1041, 980, 980, 1265, 1265, 1029, 1029, 1070, 1070, 1186, 1186, 1090, 1090, 1088, 1088]
+            &[830, 830, 1068, 1068, 995, 995, 1254, 1254, 1046, 1046, 1061, 1061, 1181, 1181, 1097, 1097, 1084, 1084]
         );
     }
 
@@ -1781,7 +1800,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_000);
-        assert_eq!(output, 3_131);
+        assert_eq!(output, 3_032);
     }
 
     #[test]
@@ -1793,7 +1812,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -2_990);
+        assert_eq!(output, -2_894);
     }
 
     #[test]
