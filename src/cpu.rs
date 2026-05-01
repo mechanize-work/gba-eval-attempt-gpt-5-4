@@ -1471,3 +1471,64 @@ fn apply_psr_mask(current: u32, value: u32, field_mask: u32) -> u32 {
     }
     next
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Mode;
+    use crate::Emulator;
+
+    fn thumb_emu(pc: u32) -> Emulator {
+        let mut emu = Emulator::new();
+        emu.cpu.set_cpsr_raw((Mode::System as u32) | (1 << 5));
+        emu.cpu.regs[15] = pc;
+        emu
+    }
+
+    #[test]
+    fn thumb_bx_uses_the_declared_source_register() {
+        let mut emu = thumb_emu(0x0300_0000);
+        emu.cpu.regs[3] = 0x0800_0101;
+        emu.cpu.regs[11] = 0;
+        emu.iwram[0] = 0x18;
+        emu.iwram[1] = 0x47; // bx r3
+
+        let cycles = emu.step_cpu();
+
+        assert_eq!(cycles, 3);
+        assert_eq!(emu.cpu.pc(), 0x0800_0100);
+        assert!(emu.cpu.thumb());
+    }
+
+    #[test]
+    fn thumb_ldr_immediate_word_reads_a_word() {
+        let mut emu = thumb_emu(0x0300_0000);
+        emu.cpu.regs[4] = 0x0300_0020;
+        emu.iwram[0] = 0x63;
+        emu.iwram[1] = 0x68; // ldr r3, [r4, #4]
+        emu.iwram[0x24..0x28].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+
+        let cycles = emu.step_cpu();
+
+        assert_eq!(cycles, 2);
+        assert_eq!(emu.cpu.regs[3], 0x1234_5678);
+        assert_eq!(emu.cpu.pc(), 0x0300_0002);
+    }
+
+    #[test]
+    fn thumb_bl_keeps_the_prefix_for_the_low_halfword() {
+        let mut emu = thumb_emu(0x0800_0178);
+        let offset = (0x0800_0178 - 0x0800_0000) as usize;
+        emu.rom_len = offset + 4;
+        emu.rom_staging[offset..offset + 4].copy_from_slice(&[0x13, 0xf0, 0x22, 0xfb]);
+
+        let first_cycles = emu.step_cpu();
+        assert_eq!(first_cycles, 1);
+        assert_eq!(emu.cpu.pc(), 0x0800_017a);
+        assert_eq!(emu.cpu.thumb_bl_prefix, Some(0x0801_317c));
+
+        let second_cycles = emu.step_cpu();
+        assert_eq!(second_cycles, 3);
+        assert_eq!(emu.cpu.pc(), 0x0801_37c0);
+        assert_eq!(emu.cpu.regs[14], 0x0800_017d);
+    }
+}

@@ -28,6 +28,7 @@ fn run() -> Result<(), String> {
     let mut trace_frames = false;
     let mut step_count: u64 = 0;
     let mut trace_steps = false;
+    let mut trace_until_steps = false;
     let mut until_pc: Option<u32> = None;
     let mut until_pc_hits: u64 = 1;
     let mut max_steps: u64 = 1_000_000;
@@ -39,6 +40,7 @@ fn run() -> Result<(), String> {
             "--dump-frame" => dump_frame_path = Some(args.next().ok_or_else(|| "missing frame path".to_string())?),
             "--dump-audio" => dump_audio_path = Some(args.next().ok_or_else(|| "missing audio path".to_string())?),
             "--trace-frames" => trace_frames = true,
+            "--trace-until-steps" => trace_until_steps = true,
             "--step" => {
                 step_count = args
                     .next()
@@ -122,7 +124,7 @@ fn run() -> Result<(), String> {
             if emu.pc() == target_pc {
                 hits += 1;
             }
-            if trace_steps {
+            if trace_until_steps {
                 let regs = emu.registers();
                 println!(
                     "step {} pc=0x{:08x} cycles={} frame={} frame_cycle={} r0=0x{:08x} r1=0x{:08x} lr=0x{:08x}",
