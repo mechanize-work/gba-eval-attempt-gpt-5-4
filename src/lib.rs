@@ -69,8 +69,9 @@ const AUDIO_OUTPUT_SCALE: i32 = 64;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
-const AUDIO_OUTPUT_FILTER_TAPS: [i32; 3] = [11, 6, -1];
-const AUDIO_OUTPUT_FILTER_DEN: i32 = 16;
+const AUDIO_OUTPUT_FILTER_TAPS: [i32; 6] = [50, 10, -6, 22, -8, -4];
+const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
+const AUDIO_OUTPUT_DEADZONE: i32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -368,15 +369,20 @@ impl Emulator {
             0
         };
         let scaled = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
-        let filtered = Self::round_divide(
-            AUDIO_OUTPUT_FILTER_TAPS[0] * scaled
-                + AUDIO_OUTPUT_FILTER_TAPS[1] * self.audio_filter_history[0]
-                + AUDIO_OUTPUT_FILTER_TAPS[2] * self.audio_filter_history[1],
-            AUDIO_OUTPUT_FILTER_DEN,
-        );
-        self.audio_filter_history[1] = self.audio_filter_history[0];
+        let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
+        for (tap, history) in AUDIO_OUTPUT_FILTER_TAPS[1..].iter().zip(self.audio_filter_history.iter()) {
+            accum += *tap * *history;
+        }
+        let filtered = Self::round_divide(accum, AUDIO_OUTPUT_FILTER_DEN);
+        let history_len = self.audio_filter_history.len();
+        self.audio_filter_history.copy_within(0..history_len - 1, 1);
         self.audio_filter_history[0] = scaled;
-        filtered.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        let clamped = filtered.clamp(i16::MIN as i32, i16::MAX as i32);
+        if clamped.abs() <= AUDIO_OUTPUT_DEADZONE {
+            0
+        } else {
+            clamped as i16
+        }
     }
 
     fn round_divide(value: i32, denominator: i32) -> i32 {
@@ -1653,7 +1659,7 @@ mod tests {
     #[test]
     fn direct_sound_generates_nonzero_pcm() {
         let mut emu = Emulator::new();
-        let outputs = AUDIO_OUTPUT_DELAY_PAIRS + AUDIO_OUTPUT_FILTER_TAPS.len();
+        let outputs = AUDIO_OUTPUT_DELAY_PAIRS + AUDIO_OUTPUT_FILTER_TAPS.len() + 1;
 
         emu.write_io_u16(REG_SOUNDCNT_H, 0x0304);
         emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
@@ -1666,8 +1672,8 @@ mod tests {
 
         assert_eq!(emu.audio_buffer.len(), outputs * 2);
         assert_eq!(
-            &emu.audio_buffer[emu.audio_buffer.len() - 6..],
-            &[704, 704, 1088, 1088, 1024, 1024]
+            &emu.audio_buffer[emu.audio_buffer.len() - 14..],
+            &[800, 800, 960, 960, 864, 864, 1216, 1216, 1088, 1088, 1024, 1024, 1024, 1024]
         );
     }
 
