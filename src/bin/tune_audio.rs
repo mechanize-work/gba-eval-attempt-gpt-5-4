@@ -4,14 +4,20 @@ use std::path::Path;
 
 const AUDIO_OUTPUT_FILTER_TAPS: [i32; 8] = [49, 11, -3, 18, -15, 3, 7, -6];
 const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
+const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
+const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
+const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
+const AUDIO_OUTPUT_INPUT_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_PREFILTER_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 3, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
+const SEARCH_INPUT_CUR_DELTAS: [i32; 5] = [-4, -2, 0, 2, 4];
+const SEARCH_INPUT_PREV_DELTAS: [i32; 9] = [-8, -4, -2, -1, 0, 1, 2, 4, 8];
 const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 const SEARCH_THR_DELTAS: [i32; 7] = [-80, -40, -20, 0, 20, 40, 80];
 const SEARCH_CNUM_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
@@ -23,6 +29,8 @@ const SEARCH_FINAL_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AudioOutputParams {
     deadzone: i32,
+    input_filter_cur: i32,
+    input_filter_prev: i32,
     prefilter_gain_num: i32,
     compress_threshold_positive: i32,
     compress_threshold_negative: i32,
@@ -48,24 +56,26 @@ impl Default for AudioOutputParams {
         // Keep these in sync with the late-stage audio constants in `src/lib.rs`.
         Self {
             deadzone: 0,
+            input_filter_cur: 128,
+            input_filter_prev: 0,
             prefilter_gain_num: 134,
             compress_threshold_positive: 2_320,
             compress_threshold_negative: 2_100,
             compress_num_positive: 128,
             compress_num_negative: 128,
-            positive_bias: 74,
-            negative_bias: 80,
+            positive_bias: 75,
+            negative_bias: 79,
             post_filter_cur: 136,
             post_filter_prev: -8,
             post_filter_prev2: 0,
             post_filter_positive_bias: 2,
-            post_filter_negative_bias: -13,
-            sign_hysteresis: 28,
+            post_filter_negative_bias: -10,
+            sign_hysteresis: 24,
             final_filter_cur: 127,
             final_filter_prev: 0,
             final_filter_prev2: 2,
             final_filter_prev3: -8,
-            final_nonzero_bias: 4,
+            final_nonzero_bias: 3,
         }
     }
 }
@@ -88,6 +98,8 @@ struct CandidateScore {
 #[derive(Clone, Copy)]
 enum ParamKind {
     Deadzone,
+    InputFilterCur,
+    InputFilterPrev,
     PrefilterGainNum,
     CompressThresholdPositive,
     CompressThresholdNegative,
@@ -109,8 +121,10 @@ enum ParamKind {
 }
 
 impl ParamKind {
-    const ALL: [ParamKind; 19] = [
+    const ALL: [ParamKind; 21] = [
         ParamKind::Deadzone,
+        ParamKind::InputFilterCur,
+        ParamKind::InputFilterPrev,
         ParamKind::PrefilterGainNum,
         ParamKind::CompressThresholdPositive,
         ParamKind::CompressThresholdNegative,
@@ -134,6 +148,8 @@ impl ParamKind {
     fn deltas(self) -> &'static [i32] {
         match self {
             ParamKind::Deadzone => &SEARCH_DEAD_DELTAS,
+            ParamKind::InputFilterCur => &SEARCH_INPUT_CUR_DELTAS,
+            ParamKind::InputFilterPrev => &SEARCH_INPUT_PREV_DELTAS,
             ParamKind::PrefilterGainNum => &SEARCH_CNUM_DELTAS,
             ParamKind::CompressThresholdPositive | ParamKind::CompressThresholdNegative => &SEARCH_THR_DELTAS,
             ParamKind::CompressNumPositive | ParamKind::CompressNumNegative => &SEARCH_CNUM_DELTAS,
@@ -157,6 +173,12 @@ impl ParamKind {
     fn apply(self, params: &mut AudioOutputParams, delta: i32) {
         match self {
             ParamKind::Deadzone => params.deadzone = (params.deadzone + delta).max(0),
+            ParamKind::InputFilterCur => {
+                params.input_filter_cur = (params.input_filter_cur + delta).clamp(120, 136)
+            }
+            ParamKind::InputFilterPrev => {
+                params.input_filter_prev = (params.input_filter_prev + delta).clamp(-16, 16)
+            }
             ParamKind::PrefilterGainNum => {
                 params.prefilter_gain_num = (params.prefilter_gain_num + delta).clamp(120, 136)
             }
@@ -204,6 +226,7 @@ fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mut max_first_regression = 0.01f64;
     let mut require_first_nonzero_match = false;
+    let mut raw_pair_input = false;
     let mut start_params = AudioOutputParams::default();
     let mut positional = Vec::new();
 
@@ -221,8 +244,17 @@ fn run() -> Result<(), String> {
                 }
             }
             "--require-first-nonzero-match" => require_first_nonzero_match = true,
+            "--raw-pair-input" => raw_pair_input = true,
             "--start-deadzone" => {
                 start_params.deadzone = parse_i32_arg(args.next(), "missing deadzone value")?.max(0);
+            }
+            "--start-input-filter-cur" => {
+                start_params.input_filter_cur =
+                    parse_i32_arg(args.next(), "missing input-filter cur value")?.clamp(120, 136);
+            }
+            "--start-input-filter-prev" => {
+                start_params.input_filter_prev =
+                    parse_i32_arg(args.next(), "missing input-filter prev value")?.clamp(-16, 16);
             }
             "--start-prefilter-gain-num" => {
                 start_params.prefilter_gain_num =
@@ -314,7 +346,7 @@ fn run() -> Result<(), String> {
 
     if positional.len() < 2 || positional.len() % 2 != 0 {
         return Err(
-            "usage: tune_audio [--max-first-regression value] <prefilter.wav> <reference.wav> [<prefilter.wav> <reference.wav> ...]"
+            "usage: tune_audio [--max-first-regression value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
                 .to_string(),
         );
     }
@@ -341,7 +373,7 @@ fn run() -> Result<(), String> {
     }
 
     let baseline_params = start_params;
-    let baseline = score_candidate(&datasets, baseline_params);
+    let baseline = score_candidate(&datasets, baseline_params, raw_pair_input);
     print_score("baseline", baseline_params, &datasets, &baseline);
 
     let best = search(
@@ -350,6 +382,7 @@ fn run() -> Result<(), String> {
         &baseline,
         max_first_regression,
         require_first_nonzero_match,
+        raw_pair_input,
     );
     if let Some((best_params, best_score)) = best {
         print_score("best", best_params, &datasets, &best_score);
@@ -373,6 +406,7 @@ fn search(
     baseline: &CandidateScore,
     max_first_regression: f64,
     require_first_nonzero_match: bool,
+    raw_pair_input: bool,
 ) -> Option<(AudioOutputParams, CandidateScore)> {
     let mut best = if require_first_nonzero_match && !matches_first_nonzero(datasets, baseline) {
         None
@@ -400,6 +434,7 @@ fn search(
                     baseline,
                     max_first_regression,
                     require_first_nonzero_match,
+                    raw_pair_input,
                     candidate,
                     &mut round_best,
                 );
@@ -418,6 +453,7 @@ fn search(
                             baseline,
                             max_first_regression,
                             require_first_nonzero_match,
+                            raw_pair_input,
                             candidate,
                             &mut round_best,
                         );
@@ -453,10 +489,11 @@ fn consider_candidate(
     baseline: &CandidateScore,
     max_first_regression: f64,
     require_first_nonzero_match: bool,
+    raw_pair_input: bool,
     params: AudioOutputParams,
     best: &mut Option<(AudioOutputParams, CandidateScore)>,
 ) {
-    let score = score_candidate(datasets, params);
+    let score = score_candidate(datasets, params, raw_pair_input);
     if score.rmses[0] > baseline.rmses[0] + max_first_regression {
         return;
     }
@@ -482,12 +519,12 @@ fn matches_first_nonzero(datasets: &[Dataset], score: &CandidateScore) -> bool {
         .all(|(pair, dataset)| *pair == dataset.reference_first_nonzero_pair)
 }
 
-fn score_candidate(datasets: &[Dataset], params: AudioOutputParams) -> CandidateScore {
+fn score_candidate(datasets: &[Dataset], params: AudioOutputParams, raw_pair_input: bool) -> CandidateScore {
     let mut total = 0.0;
     let mut rmses = Vec::with_capacity(datasets.len());
     let mut first_nonzero_pairs = Vec::with_capacity(datasets.len());
     for dataset in datasets {
-        let (rmse, first_nonzero_pair) = evaluate_dataset(dataset, params);
+        let (rmse, first_nonzero_pair) = evaluate_dataset(dataset, params, raw_pair_input);
         total += rmse;
         rmses.push(rmse);
         first_nonzero_pairs.push(first_nonzero_pair);
@@ -499,7 +536,9 @@ fn score_candidate(datasets: &[Dataset], params: AudioOutputParams) -> Candidate
     }
 }
 
-fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize) {
+fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams, raw_pair_input: bool) -> (f64, usize) {
+    let mut input_history = 0i16;
+    let mut delay_line = std::collections::VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1);
     let mut filter_history = [0i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1];
     let mut post_history = 0i16;
     let mut post_history2 = 0i16;
@@ -514,8 +553,20 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize
         .zip(dataset.reference.iter())
         .enumerate()
     {
+        let input_sample = if raw_pair_input {
+            delay_line.push_back(i32::from(scaled));
+            let delayed = if delay_line.len() > AUDIO_OUTPUT_DELAY_PAIRS {
+                delay_line.pop_front().unwrap_or(0)
+            } else {
+                0
+            };
+            delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN
+        } else {
+            i32::from(scaled)
+        };
         let output = filter_audio_sample(
-            i32::from(scaled),
+            input_sample,
+            &mut input_history,
             &mut filter_history,
             &mut post_history,
             &mut post_history2,
@@ -537,7 +588,8 @@ fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize
 }
 
 fn filter_audio_sample(
-    scaled: i32,
+    input_sample: i32,
+    input_history: &mut i16,
     filter_history: &mut [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     post_history: &mut i16,
     post_history2: &mut i16,
@@ -545,7 +597,13 @@ fn filter_audio_sample(
     final_filter_history: &mut [i16; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1],
     params: AudioOutputParams,
 ) -> i16 {
-    let scaled = round_divide(scaled * params.prefilter_gain_num, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
+    let filtered_input = round_divide(
+        input_sample * params.input_filter_cur + i32::from(*input_history) * params.input_filter_prev,
+        AUDIO_OUTPUT_INPUT_FILTER_DEN,
+    )
+    .clamp(i16::MIN as i32, i16::MAX as i32);
+    *input_history = input_sample.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let scaled = round_divide(filtered_input * params.prefilter_gain_num, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
     let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
     for (tap, history) in AUDIO_OUTPUT_FILTER_TAPS[1..].iter().zip(filter_history.iter()) {
         accum += *tap * *history;
@@ -625,8 +683,10 @@ fn filter_audio_sample(
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} pregain={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} fnonzero={} total_rmse={:.6}",
+        "{label} dead={} icur={} iprev={} pregain={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} fnonzero={} total_rmse={:.6}",
         params.deadzone,
+        params.input_filter_cur,
+        params.input_filter_prev,
         params.prefilter_gain_num,
         params.compress_threshold_positive,
         params.compress_threshold_negative,

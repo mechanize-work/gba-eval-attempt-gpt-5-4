@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-capture average|endpoint]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-pair-input-audio file.wav] [--dump-prefilter-input-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-prefilter-gain-num n] [--audio-capture average|endpoint]"
                 .to_string()
         })?;
     let frames: u32 = args
@@ -28,6 +28,7 @@ fn run() -> Result<(), String> {
     let mut replay_path: Option<String> = None;
     let mut dump_frame_path: Option<String> = None;
     let mut dump_audio_path: Option<String> = None;
+    let mut dump_pair_input_audio_path: Option<String> = None;
     let mut dump_prefilter_input_audio_path: Option<String> = None;
     let mut dump_prefilter_audio_path: Option<String> = None;
     let mut compare_audio_path: Option<String> = None;
@@ -50,6 +51,9 @@ fn run() -> Result<(), String> {
             "--replay" => replay_path = Some(args.next().ok_or_else(|| "missing replay path".to_string())?),
             "--dump-frame" => dump_frame_path = Some(args.next().ok_or_else(|| "missing frame path".to_string())?),
             "--dump-audio" => dump_audio_path = Some(args.next().ok_or_else(|| "missing audio path".to_string())?),
+            "--dump-pair-input-audio" => {
+                dump_pair_input_audio_path = Some(args.next().ok_or_else(|| "missing pair-input audio path".to_string())?)
+            }
             "--dump-prefilter-input-audio" => {
                 dump_prefilter_input_audio_path =
                     Some(args.next().ok_or_else(|| "missing prefilter input audio path".to_string())?)
@@ -151,6 +155,7 @@ fn run() -> Result<(), String> {
     let mut replay_index = 0usize;
     let mut current_keys = 0u32;
     let mut all_audio = Vec::new();
+    let mut all_pair_input_audio = Vec::new();
     let mut all_prefilter_input_audio = Vec::new();
     let mut all_prefilter_audio = Vec::new();
 
@@ -174,6 +179,7 @@ fn run() -> Result<(), String> {
             );
         }
         all_audio.extend(emu.take_audio());
+        all_pair_input_audio.extend(emu.take_pair_input_audio());
         all_prefilter_input_audio.extend(emu.take_prefilter_input_audio());
         all_prefilter_audio.extend(emu.take_prefilter_audio());
     }
@@ -240,6 +246,9 @@ fn run() -> Result<(), String> {
     }
     if let Some(path) = dump_audio_path {
         write_wav(Path::new(&path), &all_audio, emu.audio_rate() as u32)?;
+    }
+    if let Some(path) = dump_pair_input_audio_path {
+        write_wav(Path::new(&path), &all_pair_input_audio, emu.audio_rate() as u32)?;
     }
     if let Some(path) = dump_prefilter_input_audio_path {
         write_wav(Path::new(&path), &all_prefilter_input_audio, emu.audio_rate() as u32)?;
