@@ -96,6 +96,11 @@ impl Cpu {
         self.regs[15]
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn registers(&self) -> [u32; 16] {
+        self.regs
+    }
+
     pub(crate) fn mode(&self) -> Mode {
         Mode::from_bits(self.cpsr as u8)
     }
@@ -338,6 +343,7 @@ impl Cpu {
 
 impl Emulator {
     pub(crate) fn step_cpu(&mut self) -> u32 {
+        self.debug_instruction_count = self.debug_instruction_count.wrapping_add(1);
         if self.cpu.thumb() {
             self.step_thumb()
         } else {

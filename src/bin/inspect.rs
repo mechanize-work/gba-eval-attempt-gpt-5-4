@@ -25,12 +25,37 @@ fn run() -> Result<(), String> {
     let mut replay_path: Option<String> = None;
     let mut dump_frame_path: Option<String> = None;
     let mut dump_audio_path: Option<String> = None;
+    let mut trace_frames = false;
+    let mut step_count: u64 = 0;
+    let mut trace_steps = false;
+    let mut until_pc: Option<u32> = None;
+    let mut max_steps: u64 = 1_000_000;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--replay" => replay_path = Some(args.next().ok_or_else(|| "missing replay path".to_string())?),
             "--dump-frame" => dump_frame_path = Some(args.next().ok_or_else(|| "missing frame path".to_string())?),
             "--dump-audio" => dump_audio_path = Some(args.next().ok_or_else(|| "missing audio path".to_string())?),
+            "--trace-frames" => trace_frames = true,
+            "--step" => {
+                step_count = args
+                    .next()
+                    .ok_or_else(|| "missing step count".to_string())?
+                    .parse()
+                    .map_err(|_| "step count must be an integer".to_string())?;
+            }
+            "--trace-steps" => trace_steps = true,
+            "--until-pc" => {
+                let text = args.next().ok_or_else(|| "missing pc value".to_string())?;
+                until_pc = Some(parse_u32(&text).map_err(|_| "invalid pc value".to_string())?);
+            }
+            "--max-steps" => {
+                max_steps = args
+                    .next()
+                    .ok_or_else(|| "missing max step count".to_string())?
+                    .parse()
+                    .map_err(|_| "max step count must be an integer".to_string())?;
+            }
             _ => return Err(format!("unknown argument: {flag}")),
         }
     }
@@ -54,7 +79,71 @@ fn run() -> Result<(), String> {
         }
         emu.set_keys(current_keys);
         emu.run_frame();
+        if trace_frames {
+            let regs = emu.registers();
+            println!(
+                "trace frame={} pc=0x{:08x} dispcnt=0x{:04x} r0=0x{:08x} r1=0x{:08x} lr=0x{:08x}",
+                frame + 1,
+                emu.pc(),
+                emu.dispcnt(),
+                regs[0],
+                regs[1],
+                regs[14]
+            );
+        }
         all_audio.extend(emu.take_audio());
+    }
+
+    if let Some(target_pc) = until_pc {
+        let mut steps = 0u64;
+        while emu.pc() != target_pc && steps < max_steps {
+            let cycles = emu.step_instruction();
+            if cycles == 0 {
+                break;
+            }
+            steps += 1;
+            if trace_steps {
+                let regs = emu.registers();
+                println!(
+                    "step {} pc=0x{:08x} cycles={} frame={} frame_cycle={} r0=0x{:08x} r1=0x{:08x} lr=0x{:08x}",
+                    steps,
+                    emu.pc(),
+                    cycles,
+                    emu.frames_emulated(),
+                    emu.frame_cycle(),
+                    regs[0],
+                    regs[1],
+                    regs[14]
+                );
+            }
+        }
+        println!(
+            "until_pc target=0x{:08x} hit={} steps={}",
+            target_pc,
+            emu.pc() == target_pc,
+            steps
+        );
+    }
+
+    for step in 0..step_count {
+        let cycles = emu.step_instruction();
+        if cycles == 0 {
+            break;
+        }
+        if trace_steps {
+            let regs = emu.registers();
+            println!(
+                "step {} pc=0x{:08x} cycles={} frame={} frame_cycle={} r0=0x{:08x} r1=0x{:08x} lr=0x{:08x}",
+                step + 1,
+                emu.pc(),
+                cycles,
+                emu.frames_emulated(),
+                emu.frame_cycle(),
+                regs[0],
+                regs[1],
+                regs[14]
+            );
+        }
     }
 
     if let Some(path) = dump_frame_path {
@@ -71,6 +160,17 @@ fn run() -> Result<(), String> {
     println!("stopped={}", emu.stopped());
     println!("dispcnt=0x{:04x}", emu.dispcnt());
     println!("vcount={}", emu.vcount());
+    println!("instructions={}", emu.instruction_count());
+    println!("dispcnt_writes={}", emu.dispcnt_writes());
+    println!(
+        "last_dispcnt_write=0x{:08x}:0x{:04x}",
+        emu.last_dispcnt_write_pc(),
+        emu.last_dispcnt_value()
+    );
+    let regs = emu.registers();
+    for (idx, value) in regs.iter().enumerate() {
+        println!("r{idx}=0x{value:08x}");
+    }
     println!("fb_hash=0x{:016x}", fnv1a_u32(emu.framebuffer()));
     println!("audio_pairs={}", all_audio.len() / 2);
     println!("audio_rate={}", emu.audio_rate());

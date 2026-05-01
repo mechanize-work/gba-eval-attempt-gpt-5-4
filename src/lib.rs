@@ -24,6 +24,7 @@ const SCREEN_HEIGHT: usize = 160;
 const CPU_CLOCK_HZ: u32 = 16_777_216;
 const DEFAULT_AUDIO_RATE: u32 = 32_768;
 const DOUBLE_AUDIO_RATE: u32 = 65_536;
+const BOOT_AUDIO_PREROLL_PAIRS: usize = 1_500;
 
 const CYCLES_PER_LINE: u32 = 1_232;
 const HDRAW_CYCLES: u32 = 1_006;
@@ -81,6 +82,11 @@ pub(crate) struct Emulator {
     frame_cycle: u32,
     halted: bool,
     stopped: bool,
+    frames_emulated: u64,
+    debug_instruction_count: u64,
+    debug_dispcnt_writes: u32,
+    debug_last_dispcnt_write_pc: u32,
+    debug_last_dispcnt_value: u16,
 }
 
 impl Emulator {
@@ -107,6 +113,11 @@ impl Emulator {
             frame_cycle: 0,
             halted: false,
             stopped: false,
+            frames_emulated: 0,
+            debug_instruction_count: 0,
+            debug_dispcnt_writes: 0,
+            debug_last_dispcnt_write_pc: 0,
+            debug_last_dispcnt_value: 0,
         };
         emu.reset_runtime_state();
         emu
@@ -136,6 +147,11 @@ impl Emulator {
         self.frame_cycle = 0;
         self.halted = false;
         self.stopped = false;
+        self.frames_emulated = 0;
+        self.debug_instruction_count = 0;
+        self.debug_dispcnt_writes = 0;
+        self.debug_last_dispcnt_write_pc = 0;
+        self.debug_last_dispcnt_value = 0;
         self.cpu.reset();
 
         self.io_write_u16_raw(REG_DISPCNT, 0x0080);
@@ -150,9 +166,9 @@ impl Emulator {
     }
 
     fn run_frame(&mut self) {
-        self.audio_buffer.clear();
         self.run_cycles(FRAME_CYCLES);
         self.append_silence_for_frame();
+        self.frames_emulated = self.frames_emulated.wrapping_add(1);
     }
 
     fn run_cycles(&mut self, mut cycles: u32) {
@@ -175,6 +191,11 @@ impl Emulator {
 
     fn append_silence_for_frame(&mut self) {
         let rate = self.audio_rate() as u64;
+        if self.frames_emulated == 0 {
+            let preroll_pairs = (BOOT_AUDIO_PREROLL_PAIRS as u64 * rate / DEFAULT_AUDIO_RATE as u64) as usize;
+            self.audio_buffer
+                .resize(self.audio_buffer.len() + preroll_pairs * 2, 0);
+        }
         self.audio_fraction += rate * FRAME_CYCLES as u64;
         let pairs = (self.audio_fraction / CPU_CLOCK_HZ as u64) as usize;
         self.audio_fraction %= CPU_CLOCK_HZ as u64;
@@ -332,6 +353,11 @@ impl Emulator {
             0
         };
         self.io[offset] = value;
+        if reg == REG_DISPCNT {
+            self.debug_dispcnt_writes = self.debug_dispcnt_writes.wrapping_add(1);
+            self.debug_last_dispcnt_write_pc = self.cpu.pc();
+            self.debug_last_dispcnt_value = self.io_read_u16_raw(REG_DISPCNT);
+        }
         self.handle_io_write(reg, old);
     }
 
@@ -346,6 +372,11 @@ impl Emulator {
         };
         self.io[offset] = value as u8;
         self.io[offset + 1] = (value >> 8) as u8;
+        if offset == REG_DISPCNT {
+            self.debug_dispcnt_writes = self.debug_dispcnt_writes.wrapping_add(1);
+            self.debug_last_dispcnt_write_pc = self.cpu.pc();
+            self.debug_last_dispcnt_value = value;
+        }
         self.handle_io_write(offset, old);
     }
 
@@ -734,6 +765,15 @@ impl NativeEmulator {
         self.inner.run_frame();
     }
 
+    pub fn step_instruction(&mut self) -> u32 {
+        if self.inner.rom_len == 0 || self.inner.halted || self.inner.stopped {
+            return 0;
+        }
+        let used = self.inner.step_cpu().max(1);
+        self.inner.advance_time(used);
+        used
+    }
+
     pub fn framebuffer(&self) -> &[u32] {
         &self.inner.framebuffer
     }
@@ -768,6 +808,34 @@ impl NativeEmulator {
 
     pub fn vcount(&self) -> u16 {
         self.inner.vcount()
+    }
+
+    pub fn frame_cycle(&self) -> u32 {
+        self.inner.frame_cycle
+    }
+
+    pub fn frames_emulated(&self) -> u64 {
+        self.inner.frames_emulated
+    }
+
+    pub fn registers(&self) -> [u32; 16] {
+        self.inner.cpu.registers()
+    }
+
+    pub fn instruction_count(&self) -> u64 {
+        self.inner.debug_instruction_count
+    }
+
+    pub fn dispcnt_writes(&self) -> u32 {
+        self.inner.debug_dispcnt_writes
+    }
+
+    pub fn last_dispcnt_write_pc(&self) -> u32 {
+        self.inner.debug_last_dispcnt_write_pc
+    }
+
+    pub fn last_dispcnt_value(&self) -> u16 {
+        self.inner.debug_last_dispcnt_value
     }
 }
 
