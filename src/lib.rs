@@ -81,16 +81,16 @@ const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_100;
 const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
-const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 70;
-const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 77;
+const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 71;
+const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 80;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 136;
-const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -8;
+const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -5;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 1;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 3;
-const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -11;
+const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -14;
 const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 26;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 2, 4, -8];
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 3, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -520,6 +520,9 @@ impl Emulator {
             let contribution = sample << volume_shift;
             let right_enable_bit = 8 + channel * 4;
             let left_enable_bit = 9 + channel * 4;
+            // The exported PCM is mono duplicated, so accumulate any routed
+            // direct-sound channel once into the mono mixdown instead of
+            // preserving hardware left/right separation here.
             if control & ((1 << right_enable_bit) | (1 << left_enable_bit)) != 0 {
                 mono += contribution;
             }
@@ -1789,6 +1792,18 @@ mod tests {
     }
 
     #[test]
+    fn direct_sound_mono_export_sums_split_channels() {
+        let mut emu = Emulator::new();
+
+        emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        emu.write_io_u16(REG_SOUNDCNT_H, 0x120c);
+        emu.direct_sound_a_sample = 0x10;
+        emu.direct_sound_b_sample = 0x10;
+
+        assert_eq!(emu.mix_audio_level(), (8_192, 8_192));
+    }
+
+    #[test]
     fn direct_sound_generates_nonzero_pcm() {
         let mut emu = Emulator::new();
         let outputs = AUDIO_OUTPUT_DELAY_PAIRS + AUDIO_OUTPUT_FILTER_TAPS.len() + 1;
@@ -1810,7 +1825,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[904, 904, 1051, 1051, 1026, 1026, 1281, 1281, 1005, 1005, 1081, 1081, 1167, 1167, 1080, 1080, 1085, 1085]
+            &[905, 905, 1058, 1058, 1028, 1028, 1282, 1282, 1006, 1006, 1079, 1079, 1167, 1167, 1080, 1080, 1084, 1084]
         );
     }
 
@@ -1823,7 +1838,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_000);
-        assert_eq!(output, 3_306);
+        assert_eq!(output, 3_307);
     }
 
     #[test]
