@@ -8,7 +8,7 @@ const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [124, 9, -4, -1];
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [125, 9, -4, -1];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
@@ -46,18 +46,18 @@ impl Default for AudioOutputParams {
         Self {
             deadzone: 5,
             compress_threshold_positive: 2_400,
-            compress_threshold_negative: 2_120,
+            compress_threshold_negative: 2_100,
             compress_num_positive: 127,
             compress_num_negative: 127,
-            positive_bias: 72,
-            negative_bias: 76,
-            post_filter_cur: 129,
+            positive_bias: 71,
+            negative_bias: 81,
+            post_filter_cur: 128,
             post_filter_prev: 1,
             post_filter_prev2: -2,
             post_filter_positive_bias: 0,
-            post_filter_negative_bias: -8,
-            sign_hysteresis: 24,
-            final_filter_cur: 124,
+            post_filter_negative_bias: -11,
+            sign_hysteresis: 22,
+            final_filter_cur: 125,
             final_filter_prev: 9,
             final_filter_prev2: -4,
             final_filter_prev3: -1,

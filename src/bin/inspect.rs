@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n]"
                 .to_string()
         })?;
     let frames: u32 = args
@@ -30,6 +30,8 @@ fn run() -> Result<(), String> {
     let mut dump_audio_path: Option<String> = None;
     let mut dump_prefilter_audio_path: Option<String> = None;
     let mut compare_audio_path: Option<String> = None;
+    let mut audio_delay_pairs_override: Option<usize> = None;
+    let mut audio_first_pair_cycles_override: Option<u32> = None;
     let mut trace_frames = false;
     let mut step_count: u64 = 0;
     let mut trace_steps = false;
@@ -50,6 +52,22 @@ fn run() -> Result<(), String> {
             }
             "--compare-audio" => {
                 compare_audio_path = Some(args.next().ok_or_else(|| "missing comparison audio path".to_string())?)
+            }
+            "--audio-delay-pairs" => {
+                audio_delay_pairs_override = Some(
+                    args.next()
+                        .ok_or_else(|| "missing audio delay pair count".to_string())?
+                        .parse()
+                        .map_err(|_| "audio delay pair count must be an integer".to_string())?,
+                );
+            }
+            "--audio-first-pair-cycles" => {
+                audio_first_pair_cycles_override = Some(
+                    args.next()
+                        .ok_or_else(|| "missing first-pair cycle count".to_string())?
+                        .parse()
+                        .map_err(|_| "first-pair cycle count must be an integer".to_string())?,
+                );
             }
             "--trace-frames" => trace_frames = true,
             "--trace-until-steps" => trace_until_steps = true,
@@ -93,6 +111,12 @@ fn run() -> Result<(), String> {
 
     let rom = fs::read(&rom_path).map_err(|e| format!("failed to read ROM: {e}"))?;
     let mut emu = NativeEmulator::new_with_rom(&rom).ok_or_else(|| "failed to initialize emulator".to_string())?;
+    if let Some(delay_pairs) = audio_delay_pairs_override {
+        emu.set_audio_delay_pairs_for_debug(delay_pairs);
+    }
+    if let Some(first_pair_cycles) = audio_first_pair_cycles_override {
+        emu.set_audio_first_pair_cycles_for_debug(first_pair_cycles);
+    }
     let replay = if let Some(path) = replay_path {
         load_replay(Path::new(&path))?
     } else {

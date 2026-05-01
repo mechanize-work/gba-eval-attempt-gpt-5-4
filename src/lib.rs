@@ -24,7 +24,9 @@ const CPU_CLOCK_HZ: u32 = 16_777_216;
 const DEFAULT_AUDIO_RATE: u32 = 32_768;
 const DOUBLE_AUDIO_RATE: u32 = 65_536;
 const BOOT_AUDIO_PREROLL_PAIRS: usize = 1_500;
-const INITIAL_AUDIO_FRACTION: u64 = CPU_CLOCK_HZ as u64 / 4;
+const INITIAL_AUDIO_FIRST_PAIR_CYCLES: u32 = 348;
+const INITIAL_AUDIO_FRACTION: u64 =
+    CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * INITIAL_AUDIO_FIRST_PAIR_CYCLES as u64;
 
 const CYCLES_PER_LINE: u32 = 1_232;
 const HDRAW_CYCLES: u32 = 1_006;
@@ -75,20 +77,20 @@ const AUDIO_OUTPUT_DEADZONE: i32 = 5;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD_POSITIVE: i32 = 2_400;
-const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_120;
+const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_100;
 const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
-const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 72;
-const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 76;
-const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 129;
+const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 71;
+const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 81;
+const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = 1;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = -2;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 0;
-const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -8;
-const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 24;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [124, 9, -4, -1];
+const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -11;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 22;
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [125, 9, -4, -1];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,10 +122,12 @@ pub(crate) struct Emulator {
     framebuffer: Vec<u32>,
     audio_buffer: Vec<i16>,
     audio_prefilter_buffer: Vec<i16>,
+    initial_audio_fraction: u64,
     audio_fraction: u64,
     audio_accum_left: i64,
     audio_accum_right: i64,
     audio_accum_cycles: u32,
+    audio_delay_pairs: usize,
     audio_delay_line: VecDeque<i32>,
     audio_filter_history: [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     audio_post_history: i16,
@@ -180,10 +184,12 @@ impl Emulator {
             framebuffer: vec![0xff00_0000; SCREEN_WIDTH * SCREEN_HEIGHT],
             audio_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
+            initial_audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_accum_left: 0,
             audio_accum_right: 0,
             audio_accum_cycles: 0,
+            audio_delay_pairs: AUDIO_OUTPUT_DELAY_PAIRS,
             audio_delay_line: VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1),
             audio_filter_history: [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
             audio_post_history: 0,
@@ -243,7 +249,7 @@ impl Emulator {
         self.framebuffer.fill(0xff00_0000);
         self.audio_buffer.clear();
         self.audio_prefilter_buffer.clear();
-        self.audio_fraction = INITIAL_AUDIO_FRACTION;
+        self.audio_fraction = self.initial_audio_fraction;
         self.audio_accum_left = 0;
         self.audio_accum_right = 0;
         self.audio_accum_cycles = 0;
@@ -401,7 +407,7 @@ impl Emulator {
 
     fn filter_audio_output(&mut self, sample: i16) -> (i16, i16) {
         self.audio_delay_line.push_back(i32::from(sample));
-        let delayed = if self.audio_delay_line.len() > AUDIO_OUTPUT_DELAY_PAIRS {
+        let delayed = if self.audio_delay_line.len() > self.audio_delay_pairs {
             self.audio_delay_line.pop_front().unwrap_or(0)
         } else {
             0
@@ -1438,6 +1444,23 @@ impl NativeEmulator {
         self.inner.reset_runtime_state();
     }
 
+    pub fn set_audio_delay_pairs_for_debug(&mut self, delay_pairs: usize) {
+        self.inner.audio_delay_pairs = delay_pairs.max(1);
+        self.inner.audio_delay_line.clear();
+    }
+
+    pub fn set_audio_first_pair_cycles_for_debug(&mut self, cycles: u32) {
+        let rate = self.inner.audio_rate().max(1) as u64;
+        let period_cycles = (CPU_CLOCK_HZ as u64 / rate).max(1) as u32;
+        let clamped_cycles = cycles.clamp(1, period_cycles);
+        let initial_fraction = CPU_CLOCK_HZ as u64 - rate * clamped_cycles as u64;
+        self.inner.initial_audio_fraction = initial_fraction;
+        self.inner.audio_fraction = initial_fraction;
+        self.inner.audio_accum_left = 0;
+        self.inner.audio_accum_right = 0;
+        self.inner.audio_accum_cycles = 0;
+    }
+
     pub fn set_keys(&mut self, keys: u32) {
         self.inner.keys = (keys & 0x03ff) as u16;
     }
@@ -1787,7 +1810,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[830, 830, 1068, 1068, 995, 995, 1254, 1254, 1046, 1046, 1061, 1061, 1181, 1181, 1097, 1097, 1084, 1084]
+            &[829, 829, 1067, 1067, 994, 994, 1254, 1254, 1045, 1045, 1059, 1059, 1179, 1179, 1096, 1096, 1083, 1083]
         );
     }
 
@@ -1812,7 +1835,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -2_894);
+        assert_eq!(output, -2_893);
     }
 
     #[test]
