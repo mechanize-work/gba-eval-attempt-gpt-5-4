@@ -71,6 +71,8 @@ const AUDIO_OUTPUT_SCALE: i32 = 64;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
+const AUDIO_OUTPUT_PREFILTER_GAIN_NUM: i32 = 128;
+const AUDIO_OUTPUT_PREFILTER_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_FILTER_TAPS: [i32; 8] = [49, 11, -3, 18, -15, 3, 7, -6];
 const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
 const AUDIO_OUTPUT_DEADZONE: i32 = 0;
@@ -92,6 +94,7 @@ const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -14;
 const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 26;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 3, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
+const AUDIO_OUTPUT_FINAL_NONZERO_BIAS: i32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -99,6 +102,13 @@ enum DmaTiming {
     VBlank,
     HBlank,
     Special,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AudioCaptureMode {
+    Average,
+    Endpoint,
 }
 
 struct GlobalEmulator(UnsafeCell<Emulator>);
@@ -122,6 +132,7 @@ pub(crate) struct Emulator {
     framebuffer: Vec<u32>,
     audio_buffer: Vec<i16>,
     audio_prefilter_buffer: Vec<i16>,
+    audio_capture_mode: AudioCaptureMode,
     initial_audio_fraction: u64,
     audio_fraction: u64,
     audio_accum_left: i64,
@@ -184,6 +195,7 @@ impl Emulator {
             framebuffer: vec![0xff00_0000; SCREEN_WIDTH * SCREEN_HEIGHT],
             audio_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
+            audio_capture_mode: AudioCaptureMode::Average,
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_fraction: INITIAL_AUDIO_FRACTION,
             audio_accum_left: 0,
@@ -388,10 +400,18 @@ impl Emulator {
         if pairs == 0 {
             return;
         }
-        let avg_left = (self.audio_accum_left / i64::from(self.audio_accum_cycles))
-            .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
-        let avg_right = (self.audio_accum_right / i64::from(self.audio_accum_cycles))
-            .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+        let (avg_left, avg_right) = match self.audio_capture_mode {
+            AudioCaptureMode::Average => (
+                (self.audio_accum_left / i64::from(self.audio_accum_cycles))
+                    .clamp(i16::MIN as i64, i16::MAX as i64) as i16,
+                (self.audio_accum_right / i64::from(self.audio_accum_cycles))
+                    .clamp(i16::MIN as i64, i16::MAX as i64) as i16,
+            ),
+            AudioCaptureMode::Endpoint => (
+                left.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                right.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            ),
+        };
         for _ in 0..pairs {
             let (prefilter, output) =
                 self.filter_audio_output(((i32::from(avg_left) + i32::from(avg_right)) / 2) as i16);
@@ -413,6 +433,7 @@ impl Emulator {
             0
         };
         let scaled = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
+        let scaled = Self::round_divide(scaled * AUDIO_OUTPUT_PREFILTER_GAIN_NUM, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
         let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
         for (tap, history) in AUDIO_OUTPUT_FILTER_TAPS[1..].iter().zip(self.audio_filter_history.iter()) {
             accum += *tap * *history;
@@ -489,6 +510,12 @@ impl Emulator {
         let corrected_output =
             Self::round_divide(final_accum, AUDIO_OUTPUT_FINAL_FILTER_DEN).clamp(i16::MIN as i32, i16::MAX as i32)
                 as i16;
+        let corrected_output = if corrected_output == 0 {
+            0
+        } else {
+            (i32::from(corrected_output) + AUDIO_OUTPUT_FINAL_NONZERO_BIAS)
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        };
         let final_history_len = self.audio_final_filter_history.len();
         self.audio_final_filter_history
             .copy_within(0..final_history_len - 1, 1);
@@ -1464,6 +1491,22 @@ impl NativeEmulator {
         self.inner.audio_accum_cycles = 0;
     }
 
+    pub fn set_audio_capture_mode_for_debug(&mut self, mode: &str) -> Result<(), String> {
+        self.inner.audio_capture_mode = match mode {
+            "average" => AudioCaptureMode::Average,
+            "endpoint" => AudioCaptureMode::Endpoint,
+            _ => {
+                return Err(format!(
+                    "invalid audio capture mode: {mode} (expected average or endpoint)"
+                ))
+            }
+        };
+        self.inner.audio_accum_left = 0;
+        self.inner.audio_accum_right = 0;
+        self.inner.audio_accum_cycles = 0;
+        Ok(())
+    }
+
     pub fn set_keys(&mut self, keys: u32) {
         self.inner.keys = (keys & 0x03ff) as u16;
     }
@@ -1825,7 +1868,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[905, 905, 1058, 1058, 1028, 1028, 1282, 1282, 1006, 1006, 1079, 1079, 1167, 1167, 1080, 1080, 1084, 1084]
+            &[908, 908, 1061, 1061, 1031, 1031, 1285, 1285, 1009, 1009, 1082, 1082, 1170, 1170, 1083, 1083, 1087, 1087]
         );
     }
 
@@ -1838,7 +1881,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_000);
-        assert_eq!(output, 3_307);
+        assert_eq!(output, 3_310);
     }
 
     #[test]
@@ -1850,7 +1893,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -3_158);
+        assert_eq!(output, -3_155);
     }
 
     #[test]

@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     let rom_path = args
         .next()
         .ok_or_else(|| {
-            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n]"
+            "usage: inspect <rom> <frames> [--replay file] [--dump-frame file.ppm] [--dump-audio file.wav] [--dump-prefilter-audio file.wav] [--compare-audio file.wav] [--audio-delay-pairs n] [--audio-first-pair-cycles n] [--audio-capture average|endpoint]"
                 .to_string()
         })?;
     let frames: u32 = args
@@ -32,6 +32,7 @@ fn run() -> Result<(), String> {
     let mut compare_audio_path: Option<String> = None;
     let mut audio_delay_pairs_override: Option<usize> = None;
     let mut audio_first_pair_cycles_override: Option<u32> = None;
+    let mut audio_capture_mode_override: Option<String> = None;
     let mut trace_frames = false;
     let mut step_count: u64 = 0;
     let mut trace_steps = false;
@@ -68,6 +69,10 @@ fn run() -> Result<(), String> {
                         .parse()
                         .map_err(|_| "first-pair cycle count must be an integer".to_string())?,
                 );
+            }
+            "--audio-capture" => {
+                audio_capture_mode_override =
+                    Some(args.next().ok_or_else(|| "missing audio capture mode".to_string())?);
             }
             "--trace-frames" => trace_frames = true,
             "--trace-until-steps" => trace_until_steps = true,
@@ -116,6 +121,9 @@ fn run() -> Result<(), String> {
     }
     if let Some(first_pair_cycles) = audio_first_pair_cycles_override {
         emu.set_audio_first_pair_cycles_for_debug(first_pair_cycles);
+    }
+    if let Some(mode) = audio_capture_mode_override {
+        emu.set_audio_capture_mode_for_debug(&mode)?;
     }
     let replay = if let Some(path) = replay_path {
         load_replay(Path::new(&path))?

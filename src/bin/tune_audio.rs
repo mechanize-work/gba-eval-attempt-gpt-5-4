@@ -6,9 +6,10 @@ const AUDIO_OUTPUT_FILTER_TAPS: [i32; 8] = [49, 11, -3, 18, -15, 3, 7, -6];
 const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
+const AUDIO_OUTPUT_PREFILTER_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 2, 4, -8];
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 3, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 
 const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
@@ -22,6 +23,7 @@ const SEARCH_FINAL_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AudioOutputParams {
     deadzone: i32,
+    prefilter_gain_num: i32,
     compress_threshold_positive: i32,
     compress_threshold_negative: i32,
     compress_num_positive: i32,
@@ -38,6 +40,7 @@ struct AudioOutputParams {
     final_filter_prev: i32,
     final_filter_prev2: i32,
     final_filter_prev3: i32,
+    final_nonzero_bias: i32,
 }
 
 impl Default for AudioOutputParams {
@@ -45,6 +48,7 @@ impl Default for AudioOutputParams {
         // Keep these in sync with the late-stage audio constants in `src/lib.rs`.
         Self {
             deadzone: 0,
+            prefilter_gain_num: 128,
             compress_threshold_positive: 2_320,
             compress_threshold_negative: 2_100,
             compress_num_positive: 128,
@@ -61,6 +65,7 @@ impl Default for AudioOutputParams {
             final_filter_prev: 0,
             final_filter_prev2: 3,
             final_filter_prev3: -8,
+            final_nonzero_bias: 3,
         }
     }
 }
@@ -83,6 +88,7 @@ struct CandidateScore {
 #[derive(Clone, Copy)]
 enum ParamKind {
     Deadzone,
+    PrefilterGainNum,
     CompressThresholdPositive,
     CompressThresholdNegative,
     CompressNumPositive,
@@ -99,11 +105,13 @@ enum ParamKind {
     FinalFilterPrev,
     FinalFilterPrev2,
     FinalFilterPrev3,
+    FinalNonzeroBias,
 }
 
 impl ParamKind {
-    const ALL: [ParamKind; 17] = [
+    const ALL: [ParamKind; 19] = [
         ParamKind::Deadzone,
+        ParamKind::PrefilterGainNum,
         ParamKind::CompressThresholdPositive,
         ParamKind::CompressThresholdNegative,
         ParamKind::CompressNumPositive,
@@ -120,14 +128,17 @@ impl ParamKind {
         ParamKind::FinalFilterPrev,
         ParamKind::FinalFilterPrev2,
         ParamKind::FinalFilterPrev3,
+        ParamKind::FinalNonzeroBias,
     ];
 
     fn deltas(self) -> &'static [i32] {
         match self {
             ParamKind::Deadzone => &SEARCH_DEAD_DELTAS,
+            ParamKind::PrefilterGainNum => &SEARCH_CNUM_DELTAS,
             ParamKind::CompressThresholdPositive | ParamKind::CompressThresholdNegative => &SEARCH_THR_DELTAS,
             ParamKind::CompressNumPositive | ParamKind::CompressNumNegative => &SEARCH_CNUM_DELTAS,
             ParamKind::PositiveBias | ParamKind::NegativeBias => &SEARCH_BIAS_DELTAS,
+            ParamKind::FinalNonzeroBias => &SEARCH_BIAS_DELTAS,
             ParamKind::SignHysteresis => &SEARCH_HYST_DELTAS,
             ParamKind::FinalFilterCur
             | ParamKind::FinalFilterPrev
@@ -146,6 +157,9 @@ impl ParamKind {
     fn apply(self, params: &mut AudioOutputParams, delta: i32) {
         match self {
             ParamKind::Deadzone => params.deadzone = (params.deadzone + delta).max(0),
+            ParamKind::PrefilterGainNum => {
+                params.prefilter_gain_num = (params.prefilter_gain_num + delta).clamp(120, 136)
+            }
             ParamKind::CompressThresholdPositive => {
                 params.compress_threshold_positive =
                     (params.compress_threshold_positive + delta).max(0)
@@ -174,6 +188,7 @@ impl ParamKind {
             ParamKind::FinalFilterPrev => params.final_filter_prev = (params.final_filter_prev + delta).clamp(0, 16),
             ParamKind::FinalFilterPrev2 => params.final_filter_prev2 = (params.final_filter_prev2 + delta).clamp(-8, 4),
             ParamKind::FinalFilterPrev3 => params.final_filter_prev3 = (params.final_filter_prev3 + delta).clamp(-8, 4),
+            ParamKind::FinalNonzeroBias => params.final_nonzero_bias += delta,
         }
     }
 }
@@ -208,6 +223,10 @@ fn run() -> Result<(), String> {
             "--require-first-nonzero-match" => require_first_nonzero_match = true,
             "--start-deadzone" => {
                 start_params.deadzone = parse_i32_arg(args.next(), "missing deadzone value")?.max(0);
+            }
+            "--start-prefilter-gain-num" => {
+                start_params.prefilter_gain_num =
+                    parse_i32_arg(args.next(), "missing prefilter gain numerator value")?.clamp(120, 136);
             }
             "--start-threshold" => {
                 start_params.compress_threshold_positive =
@@ -284,6 +303,10 @@ fn run() -> Result<(), String> {
             "--start-final-filter-prev3" => {
                 start_params.final_filter_prev3 =
                     parse_i32_arg(args.next(), "missing final-filter prev3 value")?.clamp(-8, 4);
+            }
+            "--start-final-nonzero-bias" => {
+                start_params.final_nonzero_bias =
+                    parse_i32_arg(args.next(), "missing final nonzero bias value")?;
             }
             _ => positional.push(arg),
         }
@@ -522,6 +545,7 @@ fn filter_audio_sample(
     final_filter_history: &mut [i16; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1],
     params: AudioOutputParams,
 ) -> i16 {
+    let scaled = round_divide(scaled * params.prefilter_gain_num, AUDIO_OUTPUT_PREFILTER_GAIN_DEN);
     let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
     for (tap, history) in AUDIO_OUTPUT_FILTER_TAPS[1..].iter().zip(filter_history.iter()) {
         accum += *tap * *history;
@@ -591,13 +615,19 @@ fn filter_audio_sample(
     let history_len = final_filter_history.len();
     final_filter_history.copy_within(0..history_len - 1, 1);
     final_filter_history[0] = output;
-    corrected_output
+    if corrected_output == 0 {
+        0
+    } else {
+        (i32::from(corrected_output) + params.final_nonzero_bias)
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    }
 }
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} total_rmse={:.6}",
+        "{label} dead={} pregain={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} fnonzero={} total_rmse={:.6}",
         params.deadzone,
+        params.prefilter_gain_num,
         params.compress_threshold_positive,
         params.compress_threshold_negative,
         params.compress_num_positive,
@@ -614,6 +644,7 @@ fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], sco
         params.final_filter_prev,
         params.final_filter_prev2,
         params.final_filter_prev3,
+        params.final_nonzero_bias,
         score.total_rmse
     );
     for ((dataset, rmse), first_nonzero_pair) in datasets
