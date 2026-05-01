@@ -66,6 +66,9 @@ const TIMER_PRESCALERS: [u32; 4] = [1, 64, 256, 1_024];
 const DIRECT_SOUND_FIFO_CAPACITY: usize = 32;
 const DIRECT_SOUND_FIFO_DMA_THRESHOLD: usize = 16;
 const AUDIO_OUTPUT_SCALE: i32 = 64;
+const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
+const AUDIO_OUTPUT_GAIN_NUM: i32 = 7;
+const AUDIO_OUTPUT_GAIN_DEN: i32 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DmaTiming {
@@ -99,12 +102,16 @@ pub(crate) struct Emulator {
     audio_accum_left: i64,
     audio_accum_right: i64,
     audio_accum_cycles: u32,
+    audio_delay_line: VecDeque<i32>,
+    active_dma_channel: Option<usize>,
     fifo_a: VecDeque<i8>,
     fifo_b: VecDeque<i8>,
     direct_sound_a_sample: i8,
     direct_sound_b_sample: i8,
     keys: u16,
     frame_cycle: u32,
+    dma_src: [u32; 4],
+    dma_dst: [u32; 4],
     timer_counter: [u16; 4],
     timer_remainder: [u32; 4],
     halted: bool,
@@ -118,6 +125,12 @@ pub(crate) struct Emulator {
     debug_last_ie_value: u16,
     debug_last_haltcnt_write_pc: u32,
     debug_last_haltcnt_value: u8,
+    debug_sound_a_writes: Vec<i8>,
+    debug_sound_b_writes: Vec<i8>,
+    debug_sound_a_pops: Vec<i8>,
+    debug_sound_b_pops: Vec<i8>,
+    debug_sound_a_cpu_writes: Vec<i8>,
+    debug_sound_b_cpu_writes: Vec<i8>,
 }
 
 impl Emulator {
@@ -143,12 +156,16 @@ impl Emulator {
             audio_accum_left: 0,
             audio_accum_right: 0,
             audio_accum_cycles: 0,
+            audio_delay_line: VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1),
+            active_dma_channel: None,
             fifo_a: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
             fifo_b: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
             direct_sound_a_sample: 0,
             direct_sound_b_sample: 0,
             keys: 0,
             frame_cycle: 0,
+            dma_src: [0; 4],
+            dma_dst: [0; 4],
             timer_counter: [0; 4],
             timer_remainder: [0; 4],
             halted: false,
@@ -162,6 +179,12 @@ impl Emulator {
             debug_last_ie_value: 0,
             debug_last_haltcnt_write_pc: 0,
             debug_last_haltcnt_value: 0,
+            debug_sound_a_writes: Vec::with_capacity(64),
+            debug_sound_b_writes: Vec::with_capacity(64),
+            debug_sound_a_pops: Vec::with_capacity(64),
+            debug_sound_b_pops: Vec::with_capacity(64),
+            debug_sound_a_cpu_writes: Vec::with_capacity(16),
+            debug_sound_b_cpu_writes: Vec::with_capacity(16),
         };
         emu.reset_runtime_state();
         emu
@@ -190,12 +213,16 @@ impl Emulator {
         self.audio_accum_left = 0;
         self.audio_accum_right = 0;
         self.audio_accum_cycles = 0;
+        self.audio_delay_line.clear();
+        self.active_dma_channel = None;
         self.fifo_a.clear();
         self.fifo_b.clear();
         self.direct_sound_a_sample = 0;
         self.direct_sound_b_sample = 0;
         self.keys = 0;
         self.frame_cycle = 0;
+        self.dma_src = [0; 4];
+        self.dma_dst = [0; 4];
         self.timer_counter = [0; 4];
         self.timer_remainder = [0; 4];
         self.halted = false;
@@ -209,6 +236,12 @@ impl Emulator {
         self.debug_last_ie_value = 0;
         self.debug_last_haltcnt_write_pc = 0;
         self.debug_last_haltcnt_value = 0;
+        self.debug_sound_a_writes.clear();
+        self.debug_sound_b_writes.clear();
+        self.debug_sound_a_pops.clear();
+        self.debug_sound_b_pops.clear();
+        self.debug_sound_a_cpu_writes.clear();
+        self.debug_sound_b_cpu_writes.clear();
         self.cpu.reset();
 
         self.io_write_u16_raw(REG_DISPCNT, 0x0080);
@@ -313,12 +346,24 @@ impl Emulator {
         let avg_right = (self.audio_accum_right / i64::from(self.audio_accum_cycles))
             .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
         for _ in 0..pairs {
-            self.audio_buffer.push(avg_left);
-            self.audio_buffer.push(avg_right);
+            let output = self.filter_audio_output(((i32::from(avg_left) + i32::from(avg_right)) / 2) as i16);
+            self.audio_buffer.push(output);
+            self.audio_buffer.push(output);
         }
         self.audio_accum_left = 0;
         self.audio_accum_right = 0;
         self.audio_accum_cycles = 0;
+    }
+
+    fn filter_audio_output(&mut self, sample: i16) -> i16 {
+        self.audio_delay_line.push_back(i32::from(sample));
+        let delayed = if self.audio_delay_line.len() > AUDIO_OUTPUT_DELAY_PAIRS {
+            self.audio_delay_line.pop_front().unwrap_or(0)
+        } else {
+            0
+        };
+        let scaled = delayed * AUDIO_OUTPUT_GAIN_NUM / AUDIO_OUTPUT_GAIN_DEN;
+        scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16
     }
 
     fn mix_audio_level(&self) -> (i32, i32) {
@@ -327,8 +372,7 @@ impl Emulator {
         }
 
         let control = self.io_read_u16_raw(REG_SOUNDCNT_H);
-        let mut left = 0i32;
-        let mut right = 0i32;
+        let mut mono = 0i32;
 
         for (channel, sample) in [
             (0usize, self.direct_sound_a_sample as i32),
@@ -338,18 +382,14 @@ impl Emulator {
             let contribution = sample << volume_shift;
             let right_enable_bit = 8 + channel * 4;
             let left_enable_bit = 9 + channel * 4;
-            if control & (1 << right_enable_bit) != 0 {
-                right += contribution;
-            }
-            if control & (1 << left_enable_bit) != 0 {
-                left += contribution;
+            if control & ((1 << right_enable_bit) | (1 << left_enable_bit)) != 0 {
+                mono += contribution;
             }
         }
 
         let bias = (self.io_read_u16_raw(REG_SOUNDBIAS) & 0x03fe) as i32;
-        let left = ((left + bias).clamp(0, 0x3ff) - bias) * AUDIO_OUTPUT_SCALE;
-        let right = ((right + bias).clamp(0, 0x3ff) - bias) * AUDIO_OUTPUT_SCALE;
-        (left, right)
+        let mono = ((mono + bias).clamp(0, 0x3ff) - bias) * AUDIO_OUTPUT_SCALE;
+        (mono, mono)
     }
 
     fn fifo_for_offset(&mut self, offset: usize) -> Option<&mut VecDeque<i8>> {
@@ -363,7 +403,22 @@ impl Emulator {
     fn push_fifo_byte(&mut self, offset: usize, value: u8) {
         if let Some(fifo) = self.fifo_for_offset(offset) {
             if fifo.len() < DIRECT_SOUND_FIFO_CAPACITY {
-                fifo.push_back(value as i8);
+                let sample = value as i8;
+                fifo.push_back(sample);
+                let debug = if offset < REG_FIFO_B {
+                    &mut self.debug_sound_a_writes
+                } else {
+                    &mut self.debug_sound_b_writes
+                };
+                Self::push_debug_sample(debug, sample);
+                if self.active_dma_channel.is_none() {
+                    let debug = if offset < REG_FIFO_B {
+                        &mut self.debug_sound_a_cpu_writes
+                    } else {
+                        &mut self.debug_sound_b_cpu_writes
+                    };
+                    Self::push_debug_sample(debug, sample);
+                }
             }
         }
     }
@@ -382,13 +437,24 @@ impl Emulator {
     }
 
     fn prime_sound_dma_fifo(&mut self, fifo_addr: u32) {
-        let len = if fifo_addr == 0x0400_00a0 {
-            self.fifo_a.len()
-        } else {
-            self.fifo_b.len()
-        };
-        if len <= DIRECT_SOUND_FIFO_DMA_THRESHOLD {
+        loop {
+            let len = if fifo_addr == 0x0400_00a0 {
+                self.fifo_a.len()
+            } else {
+                self.fifo_b.len()
+            };
+            if len > DIRECT_SOUND_FIFO_DMA_THRESHOLD {
+                break;
+            }
             self.run_dma_sound_request(fifo_addr);
+            let new_len = if fifo_addr == 0x0400_00a0 {
+                self.fifo_a.len()
+            } else {
+                self.fifo_b.len()
+            };
+            if new_len <= len {
+                break;
+            }
         }
     }
 
@@ -405,9 +471,18 @@ impl Emulator {
 
         if channel == 0 {
             self.direct_sound_a_sample = sample;
+            Self::push_debug_sample(&mut self.debug_sound_a_pops, sample);
         } else {
             self.direct_sound_b_sample = sample;
+            Self::push_debug_sample(&mut self.debug_sound_b_pops, sample);
         }
+    }
+
+    fn push_debug_sample(debug: &mut Vec<i8>, sample: i8) {
+        if debug.len() == 64 {
+            debug.remove(0);
+        }
+        debug.push(sample);
     }
 
     fn handle_timer_overflow(&mut self, timer: usize, overflows: u32) {
@@ -576,6 +651,7 @@ impl Emulator {
         self.io_write_u8_raw(offset + 1, (value >> 8) as u8);
     }
 
+    #[cfg(test)]
     fn io_write_u32_raw(&mut self, offset: usize, value: u32) {
         self.io_write_u16_raw(offset, value as u16);
         self.io_write_u16_raw(offset + 2, (value >> 16) as u16);
@@ -594,6 +670,10 @@ impl Emulator {
             .iter()
             .position(|base| reg == *base + 2)
             .map(|timer| (timer, self.io_read_u16_raw(reg)));
+        let dma_control_write = DMA_REG_BASES
+            .iter()
+            .position(|base| reg == *base + 0x0a)
+            .map(|channel| (channel, self.io_read_u16_raw(reg)));
         let old = if reg == REG_IF {
             self.io_read_u16_raw(REG_IF)
         } else {
@@ -621,6 +701,10 @@ impl Emulator {
             self.handle_timer_control_write(timer, old_control);
             return;
         }
+        if let Some((channel, old_control)) = dma_control_write {
+            self.handle_dma_control_write(channel, old_control);
+            return;
+        }
         self.handle_io_write(reg, old);
     }
 
@@ -636,6 +720,10 @@ impl Emulator {
             .iter()
             .position(|base| offset == *base + 2)
             .map(|timer| (timer, self.io_read_u16_raw(offset)));
+        let dma_control_write = DMA_REG_BASES
+            .iter()
+            .position(|base| offset == *base + 0x0a)
+            .map(|channel| (channel, self.io_read_u16_raw(offset)));
         let old = if offset == REG_IF {
             self.io_read_u16_raw(REG_IF)
         } else {
@@ -658,6 +746,10 @@ impl Emulator {
         }
         if let Some((timer, old_control)) = timer_control_write {
             self.handle_timer_control_write(timer, old_control);
+            return;
+        }
+        if let Some((channel, old_control)) = dma_control_write {
+            self.handle_dma_control_write(channel, old_control);
             return;
         }
         self.handle_io_write(offset, old);
@@ -708,16 +800,6 @@ impl Emulator {
                 }
             }
             _ if offset == REG_HALTCNT || offset + 1 == REG_HALTCNT => self.handle_haltcnt_write(),
-            _ if DMA_REG_BASES
-                .iter()
-                .any(|base| offset == base + 0x0a || offset == base + 0x0b) =>
-            {
-                let channel = DMA_REG_BASES
-                    .iter()
-                    .position(|base| offset == base + 0x0a || offset == base + 0x0b)
-                    .unwrap_or(0);
-                self.handle_dma_control_write(channel);
-            }
             _ => {}
         }
     }
@@ -741,6 +823,12 @@ impl Emulator {
         } else if old_enabled && !new_enabled {
             self.timer_remainder[timer] = 0;
         }
+    }
+
+    fn reload_dma_channel(&mut self, channel: usize) {
+        let base = DMA_REG_BASES[channel];
+        self.dma_src[channel] = self.io_read_u32_raw(base);
+        self.dma_dst[channel] = self.io_read_u32_raw(base + 0x04);
     }
 
     fn timer_reload(&self, timer: usize) -> u16 {
@@ -838,17 +926,22 @@ impl Emulator {
         overflows
     }
 
-    fn handle_dma_control_write(&mut self, channel: usize) {
+    fn handle_dma_control_write(&mut self, channel: usize, old_control: u16) {
         let base = DMA_REG_BASES[channel];
         let control = self.io_read_u16_raw(base + 0x0a);
-        if control & (1 << 15) == 0 {
+        let old_enabled = old_control & (1 << 15) != 0;
+        let new_enabled = control & (1 << 15) != 0;
+        if !old_enabled && new_enabled {
+            self.reload_dma_channel(channel);
+        }
+        if !new_enabled {
             return;
         }
         if self.dma_timing(channel) == DmaTiming::Immediate {
             self.run_dma_channel(channel);
             return;
         }
-        if self.dma_timing(channel) == DmaTiming::Special && (1..=2).contains(&channel) {
+        if !old_enabled && self.dma_timing(channel) == DmaTiming::Special && (1..=2).contains(&channel) {
             let fifo_addr = self.io_read_u32_raw(base + 0x04);
             if fifo_addr == 0x0400_00a0 || fifo_addr == 0x0400_00a4 {
                 self.prime_sound_dma_fifo(fifo_addr);
@@ -896,10 +989,11 @@ impl Emulator {
     }
 
     fn run_dma_channel_inner(&mut self, channel: usize, sound_fifo: bool) {
+        let prev_dma_channel = self.active_dma_channel.replace(channel);
         let base = DMA_REG_BASES[channel];
-        let mut src = self.io_read_u32_raw(base);
-        let mut dst = self.io_read_u32_raw(base + 0x04);
         let control = self.io_read_u16_raw(base + 0x0a);
+        let mut src = self.dma_src[channel];
+        let mut dst = self.dma_dst[channel];
         let mut count = self.io_read_u16_raw(base + 0x08) as u32;
         let word = sound_fifo || control & (1 << 10) != 0;
         let repeat = control & (1 << 9) != 0 && self.dma_timing(channel) != DmaTiming::Immediate;
@@ -942,14 +1036,17 @@ impl Emulator {
             self.raise_interrupt(1 << (8 + channel));
         }
 
-        self.io_write_u32_raw(base, src);
-        if !sound_fifo && (dst_mode != 3 || !repeat) {
-            self.io_write_u32_raw(base + 0x04, dst);
-        }
+        self.dma_src[channel] = src;
+        self.dma_dst[channel] = if repeat && !sound_fifo && dst_mode == 3 {
+            self.io_read_u32_raw(base + 0x04)
+        } else {
+            dst
+        };
 
         if !repeat {
             self.io_write_u16_raw(base + 0x0a, control & !(1 << 15));
         }
+        self.active_dma_channel = prev_dma_channel;
     }
 
     fn io_read_u16_raw(&self, offset: usize) -> u16 {
@@ -1320,6 +1417,46 @@ impl NativeEmulator {
     pub fn peek_u32(&self, addr: u32) -> u32 {
         self.inner.read_u32_mapped(addr)
     }
+
+    pub fn direct_sound_a_sample(&self) -> i8 {
+        self.inner.direct_sound_a_sample
+    }
+
+    pub fn direct_sound_b_sample(&self) -> i8 {
+        self.inner.direct_sound_b_sample
+    }
+
+    pub fn fifo_a_len(&self) -> usize {
+        self.inner.fifo_a.len()
+    }
+
+    pub fn fifo_b_len(&self) -> usize {
+        self.inner.fifo_b.len()
+    }
+
+    pub fn debug_sound_a_writes(&self) -> &[i8] {
+        &self.inner.debug_sound_a_writes
+    }
+
+    pub fn debug_sound_b_writes(&self) -> &[i8] {
+        &self.inner.debug_sound_b_writes
+    }
+
+    pub fn debug_sound_a_pops(&self) -> &[i8] {
+        &self.inner.debug_sound_a_pops
+    }
+
+    pub fn debug_sound_b_pops(&self) -> &[i8] {
+        &self.inner.debug_sound_b_pops
+    }
+
+    pub fn debug_sound_a_cpu_writes(&self) -> &[i8] {
+        &self.inner.debug_sound_a_cpu_writes
+    }
+
+    pub fn debug_sound_b_cpu_writes(&self) -> &[i8] {
+        &self.inner.debug_sound_b_cpu_writes
+    }
 }
 
 #[no_mangle]
@@ -1479,16 +1616,17 @@ mod tests {
         ]);
         emu.io_write_u32_raw(0x0bc, 0x0200_0000);
         emu.io_write_u32_raw(0x0c0, 0x0400_00a0);
-        emu.io_write_u16_raw(0x0c6, 0xb600);
+        emu.write_io_u16(0x0c6, 0xb600);
         emu.write_io_u16(REG_TM0CNT_L, 0xffff);
         emu.write_io_u16(REG_TM0CNT_H, 0x0080);
 
         emu.advance_time(1);
 
         assert_eq!(emu.direct_sound_a_sample, 0x7f);
-        assert_eq!(emu.fifo_a.len(), DIRECT_SOUND_FIFO_CAPACITY / 2);
+        assert_eq!(emu.fifo_a.len(), DIRECT_SOUND_FIFO_CAPACITY);
         assert_eq!(emu.fifo_a.front().copied(), Some(1));
-        assert_eq!(emu.io_read_u32_raw(0x0bc), 0x0200_0010);
+        assert_eq!(emu.io_read_u32_raw(0x0bc), 0x0200_0000);
+        assert_eq!(emu.dma_src[1], 0x0200_0020);
     }
 
     #[test]
@@ -1500,9 +1638,32 @@ mod tests {
         emu.write_io_u8(REG_FIFO_A, 0x10);
         emu.direct_sound_a_sample = 0x10;
 
-        emu.emit_audio_for_cycles(512);
+        for _ in 0..=AUDIO_OUTPUT_DELAY_PAIRS {
+            emu.emit_audio_for_cycles(512);
+        }
 
-        assert_eq!(emu.audio_buffer, vec![4096, 4096]);
+        assert_eq!(emu.audio_buffer.len(), (AUDIO_OUTPUT_DELAY_PAIRS + 1) * 2);
+        assert_eq!(
+            &emu.audio_buffer[emu.audio_buffer.len() - 2..],
+            &[896, 896]
+        );
+    }
+
+    #[test]
+    fn immediate_dma_keeps_visible_source_and_dest_registers() {
+        let mut emu = Emulator::new();
+
+        emu.ewram[0..4].copy_from_slice(&0x4433_2211u32.to_le_bytes());
+        emu.io_write_u32_raw(0x0b0, 0x0200_0000);
+        emu.io_write_u32_raw(0x0b4, 0x0200_0010);
+        emu.io_write_u16_raw(0x0b8, 1);
+        emu.write_io_u16(0x0ba, 0x8400);
+
+        assert_eq!(emu.read_u32_mapped(0x0200_0010), 0x4433_2211);
+        assert_eq!(emu.io_read_u32_raw(0x0b0), 0x0200_0000);
+        assert_eq!(emu.io_read_u32_raw(0x0b4), 0x0200_0010);
+        assert_eq!(emu.dma_src[0], 0x0200_0004);
+        assert_eq!(emu.dma_dst[0], 0x0200_0014);
     }
 
     #[test]

@@ -33,6 +33,7 @@ fn run() -> Result<(), String> {
     let mut until_pc_hits: u64 = 1;
     let mut max_steps: u64 = 1_000_000;
     let mut peek_addrs: Vec<u32> = Vec::new();
+    let mut trace_sound = false;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -74,6 +75,7 @@ fn run() -> Result<(), String> {
                 let text = args.next().ok_or_else(|| "missing peek address".to_string())?;
                 peek_addrs.push(parse_u32(&text).map_err(|_| "invalid peek address".to_string())?);
             }
+            "--trace-sound" => trace_sound = true,
             _ => return Err(format!("unknown argument: {flag}")),
         }
     }
@@ -211,6 +213,18 @@ fn run() -> Result<(), String> {
     println!("audio_hash=0x{:016x}", fnv1a_i16(&all_audio));
     for addr in peek_addrs {
         println!("peek32[0x{addr:08x}]=0x{:08x}", emu.peek_u32(addr));
+    }
+    if trace_sound {
+        println!("sound_a_sample={}", emu.direct_sound_a_sample());
+        println!("sound_b_sample={}", emu.direct_sound_b_sample());
+        println!("fifo_a_len={}", emu.fifo_a_len());
+        println!("fifo_b_len={}", emu.fifo_b_len());
+        println!("sound_a_writes={:?}", emu.debug_sound_a_writes());
+        println!("sound_b_writes={:?}", emu.debug_sound_b_writes());
+        println!("sound_a_pops={:?}", emu.debug_sound_a_pops());
+        println!("sound_b_pops={:?}", emu.debug_sound_b_pops());
+        println!("sound_a_cpu_writes={:?}", emu.debug_sound_a_cpu_writes());
+        println!("sound_b_cpu_writes={:?}", emu.debug_sound_b_cpu_writes());
     }
 
     Ok(())
