@@ -97,7 +97,7 @@ const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 5;
 const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -7;
 const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 28;
-const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [127, 0, 2, -8];
+const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 0, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_FINAL_NONZERO_BIAS: i32 = 3;
 
@@ -2670,7 +2670,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[1003, 1003, 1044, 1044, 1016, 1016, 1310, 1310, 959, 959, 1092, 1092, 1171, 1171, 1061, 1061, 1082, 1082]
+            &[1011, 1011, 1052, 1052, 1008, 1008, 1304, 1304, 951, 951, 1079, 1079, 1165, 1165, 1052, 1052, 1072, 1072]
         );
     }
 
@@ -2683,7 +2683,7 @@ mod tests {
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_516);
-        assert_eq!(output, 3_695);
+        assert_eq!(output, 3_724);
     }
 
     #[test]
@@ -2695,7 +2695,7 @@ mod tests {
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_516);
-        assert_eq!(output, -3_534);
+        assert_eq!(output, -3_562);
     }
 
     #[test]
