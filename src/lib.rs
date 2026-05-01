@@ -68,6 +68,8 @@ const TIMER_PRESCALERS: [u32; 4] = [1, 64, 256, 1_024];
 const DIRECT_SOUND_FIFO_CAPACITY: usize = 32;
 const DIRECT_SOUND_FIFO_DMA_THRESHOLD: usize = 16;
 const AUDIO_OUTPUT_SCALE: i32 = 64;
+const AUDIO_CAPTURE_DEFAULT_POINT_NUM: u32 = 2;
+const AUDIO_CAPTURE_DEFAULT_POINT_DEN: u32 = 7;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
@@ -112,6 +114,7 @@ enum DmaTiming {
 enum AudioCaptureMode {
     Average,
     Midpoint,
+    Point,
     Endpoint,
     EndpointAfterTimer,
 }
@@ -219,6 +222,8 @@ pub(crate) struct Emulator {
     audio_accum_right: i64,
     audio_accum_cycles: u32,
     audio_capture_pair_cycles: u32,
+    audio_capture_point_num: u32,
+    audio_capture_point_den: u32,
     audio_capture_midpoint_left: i16,
     audio_capture_midpoint_right: i16,
     audio_capture_midpoint_ready: bool,
@@ -292,7 +297,7 @@ impl Emulator {
             audio_pair_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
-            audio_capture_mode: AudioCaptureMode::Average,
+            audio_capture_mode: AudioCaptureMode::Point,
             audio_mix_mode: AudioMixMode::Legacy,
             audio_output_params: AudioOutputParams::default(),
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
@@ -301,6 +306,8 @@ impl Emulator {
             audio_accum_right: 0,
             audio_accum_cycles: 0,
             audio_capture_pair_cycles: 0,
+            audio_capture_point_num: AUDIO_CAPTURE_DEFAULT_POINT_NUM,
+            audio_capture_point_den: AUDIO_CAPTURE_DEFAULT_POINT_DEN,
             audio_capture_midpoint_left: 0,
             audio_capture_midpoint_right: 0,
             audio_capture_midpoint_ready: false,
@@ -527,6 +534,9 @@ impl Emulator {
         }
         match self.audio_capture_mode {
             AudioCaptureMode::Average => self.emit_average_audio_pairs(pairs),
+            AudioCaptureMode::Midpoint | AudioCaptureMode::Point => {
+                self.emit_point_audio_pairs(pairs, left, right)
+            }
             AudioCaptureMode::Endpoint | AudioCaptureMode::EndpointAfterTimer => {
                 self.emit_endpoint_audio_pairs(pairs, left, right)
             }
@@ -534,6 +544,7 @@ impl Emulator {
     }
 
     fn accumulate_audio_for_cycles(&mut self, cycles: u32, left: i32, right: i32) -> usize {
+        self.record_point_audio_capture(cycles, left, right);
         self.audio_accum_left += i64::from(left) * i64::from(cycles);
         self.audio_accum_right += i64::from(right) * i64::from(cycles);
         self.audio_accum_cycles += cycles;
@@ -545,6 +556,44 @@ impl Emulator {
         pairs
     }
 
+    fn clamp_capture_sample(left: i32, right: i32) -> (i16, i16) {
+        (
+            left.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            right.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        )
+    }
+
+    fn record_point_audio_capture(&mut self, cycles: u32, left: i32, right: i32) {
+        let (point_num, point_den) = match self.audio_capture_mode {
+            AudioCaptureMode::Midpoint => (1, 2),
+            AudioCaptureMode::Point => (self.audio_capture_point_num, self.audio_capture_point_den),
+            _ => return,
+        };
+        if cycles == 0 {
+            return;
+        }
+        if self.audio_accum_cycles == 0 {
+            self.audio_capture_pair_cycles = self.cycles_to_next_audio_pair();
+            self.audio_capture_midpoint_ready = false;
+        }
+        if self.audio_capture_midpoint_ready {
+            return;
+        }
+        let point_cycle = (((self.audio_capture_pair_cycles as u64 * point_num as u64)
+            + point_den as u64
+            - 1)
+            / point_den as u64)
+            .clamp(1, self.audio_capture_pair_cycles as u64) as u32;
+        let start = self.audio_accum_cycles;
+        let end = start + cycles;
+        if start < point_cycle && end >= point_cycle {
+            let (left, right) = Self::clamp_capture_sample(left, right);
+            self.audio_capture_midpoint_left = left;
+            self.audio_capture_midpoint_right = right;
+            self.audio_capture_midpoint_ready = true;
+        }
+    }
+
     fn emit_average_audio_pairs(&mut self, pairs: usize) {
         let avg_left = (self.audio_accum_left / i64::from(self.audio_accum_cycles))
             .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
@@ -553,9 +602,17 @@ impl Emulator {
         self.emit_audio_pairs_from_capture(pairs, avg_left, avg_right);
     }
 
+    fn emit_point_audio_pairs(&mut self, pairs: usize, left: i32, right: i32) {
+        let (left, right) = if self.audio_capture_midpoint_ready {
+            (self.audio_capture_midpoint_left, self.audio_capture_midpoint_right)
+        } else {
+            Self::clamp_capture_sample(left, right)
+        };
+        self.emit_audio_pairs_from_capture(pairs, left, right);
+    }
+
     fn emit_endpoint_audio_pairs(&mut self, pairs: usize, left: i32, right: i32) {
-        let left = left.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let right = right.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let (left, right) = Self::clamp_capture_sample(left, right);
         self.emit_audio_pairs_from_capture(pairs, left, right);
     }
 
@@ -569,12 +626,14 @@ impl Emulator {
             self.audio_prefilter_input_buffer.push(prefilter_input);
             self.audio_prefilter_buffer.push(prefilter);
             self.audio_prefilter_buffer.push(prefilter);
-            self.audio_buffer.push(output);
-            self.audio_buffer.push(output);
-        }
-        self.audio_accum_left = 0;
-        self.audio_accum_right = 0;
-        self.audio_accum_cycles = 0;
+        self.audio_buffer.push(output);
+        self.audio_buffer.push(output);
+    }
+    self.audio_accum_left = 0;
+    self.audio_accum_right = 0;
+    self.audio_accum_cycles = 0;
+    self.audio_capture_pair_cycles = 0;
+    self.audio_capture_midpoint_ready = false;
     }
 
     fn filter_audio_output(&mut self, sample: i16) -> (i16, i16, i16) {
@@ -687,6 +746,10 @@ impl Emulator {
         self.audio_accum_left = 0;
         self.audio_accum_right = 0;
         self.audio_accum_cycles = 0;
+        self.audio_capture_pair_cycles = 0;
+        self.audio_capture_midpoint_left = 0;
+        self.audio_capture_midpoint_right = 0;
+        self.audio_capture_midpoint_ready = false;
         self.audio_delay_line.clear();
         self.audio_input_history = 0;
         self.audio_filter_history = [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1];
@@ -694,6 +757,46 @@ impl Emulator {
         self.audio_post_history2 = 0;
         self.audio_last_nonzero_output = 0;
         self.audio_final_filter_history = [0; AUDIO_OUTPUT_FINAL_FILTER_TAPS.len() - 1];
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn set_audio_capture_mode_for_debug(&mut self, mode: &str) -> Result<(), String> {
+        let (capture_mode, point_num, point_den) = if let Some(rest) = mode.strip_prefix("point:") {
+            let Some((num_text, den_text)) = rest.split_once('/') else {
+                return Err(format!(
+                    "invalid audio capture mode: {mode} (expected point:<num>/<den>)"
+                ));
+            };
+            let num = num_text
+                .parse::<u32>()
+                .map_err(|_| format!("invalid audio capture point numerator: {num_text}"))?;
+            let den = den_text
+                .parse::<u32>()
+                .map_err(|_| format!("invalid audio capture point denominator: {den_text}"))?;
+            if num == 0 || den == 0 || num > den {
+                return Err(format!(
+                    "invalid audio capture mode: {mode} (expected point:<num>/<den> with 1 <= num <= den)"
+                ));
+            }
+            (AudioCaptureMode::Point, num, den)
+        } else {
+            match mode {
+                "average" => (AudioCaptureMode::Average, 1, 2),
+                "midpoint" => (AudioCaptureMode::Midpoint, 1, 2),
+                "endpoint" => (AudioCaptureMode::Endpoint, 1, 1),
+                "endpoint-after-timer" => (AudioCaptureMode::EndpointAfterTimer, 1, 1),
+                _ => {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected average, midpoint, point:<num>/<den>, endpoint, or endpoint-after-timer)"
+                    ))
+                }
+            }
+        };
+        self.audio_capture_mode = capture_mode;
+        self.audio_capture_point_num = point_num;
+        self.audio_capture_point_den = point_den;
+        self.reset_audio_output_history_for_debug();
+        Ok(())
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1905,18 +2008,7 @@ impl NativeEmulator {
     }
 
     pub fn set_audio_capture_mode_for_debug(&mut self, mode: &str) -> Result<(), String> {
-        self.inner.audio_capture_mode = match mode {
-            "average" => AudioCaptureMode::Average,
-            "endpoint" => AudioCaptureMode::Endpoint,
-            "endpoint-after-timer" => AudioCaptureMode::EndpointAfterTimer,
-            _ => {
-                return Err(format!(
-                    "invalid audio capture mode: {mode} (expected average, endpoint, or endpoint-after-timer)"
-                ))
-            }
-        };
-        self.inner.reset_audio_output_history_for_debug();
-        Ok(())
+        self.inner.set_audio_capture_mode_for_debug(mode)
     }
 
     pub fn set_audio_mix_mode_for_debug(&mut self, mode: &str) -> Result<(), String> {
@@ -2502,6 +2594,56 @@ mod tests {
     }
 
     #[test]
+    fn midpoint_capture_uses_sample_at_pair_midpoint() {
+        let mut emu = Emulator::new();
+        emu.audio_capture_mode = AudioCaptureMode::Midpoint;
+        emu.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 4;
+        emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        emu.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        emu.direct_sound_a_sample = 1;
+        emu.emit_audio_for_cycles(1);
+
+        emu.direct_sound_a_sample = 2;
+        let expected = emu.mix_audio_level().0 as i16;
+        emu.emit_audio_for_cycles(1);
+
+        emu.direct_sound_a_sample = 3;
+        emu.emit_audio_for_cycles(1);
+
+        emu.direct_sound_a_sample = 4;
+        emu.emit_audio_for_cycles(1);
+
+        assert_eq!(emu.audio_pair_input_buffer, vec![expected, expected]);
+    }
+
+    #[test]
+    fn fractional_point_capture_uses_configured_phase() {
+        let mut emu = Emulator::new();
+        emu.audio_capture_mode = AudioCaptureMode::Point;
+        emu.audio_capture_point_num = 3;
+        emu.audio_capture_point_den = 4;
+        emu.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 4;
+        emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        emu.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        emu.direct_sound_a_sample = 1;
+        emu.emit_audio_for_cycles(1);
+
+        emu.direct_sound_a_sample = 2;
+        emu.emit_audio_for_cycles(1);
+
+        emu.direct_sound_a_sample = 3;
+        let expected = emu.mix_audio_level().0 as i16;
+        emu.emit_audio_for_cycles(1);
+
+        emu.direct_sound_a_sample = 4;
+        emu.emit_audio_for_cycles(1);
+
+        assert_eq!(emu.audio_pair_input_buffer, vec![expected, expected]);
+    }
+
+    #[test]
     fn direct_sound_generates_nonzero_pcm() {
         let mut emu = Emulator::new();
         let outputs = AUDIO_OUTPUT_DELAY_PAIRS + AUDIO_OUTPUT_FILTER_TAPS.len() + 1;
@@ -2554,6 +2696,17 @@ mod tests {
 
         assert_eq!(prefilter, -4_516);
         assert_eq!(output, -3_502);
+    }
+
+    #[test]
+    fn audio_capture_mode_parser_accepts_fractional_points() {
+        let mut emu = NativeEmulator { inner: Emulator::new() };
+
+        emu.set_audio_capture_mode_for_debug("point:3/4").unwrap();
+
+        assert_eq!(emu.inner.audio_capture_mode, AudioCaptureMode::Point);
+        assert_eq!(emu.inner.audio_capture_point_num, 3);
+        assert_eq!(emu.inner.audio_capture_point_den, 4);
     }
 
     #[test]
