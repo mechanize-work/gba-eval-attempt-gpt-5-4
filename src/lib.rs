@@ -71,16 +71,17 @@ const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
 const AUDIO_OUTPUT_FILTER_TAPS: [i32; 8] = [49, 11, -3, 18, -15, 3, 7, -6];
 const AUDIO_OUTPUT_FILTER_DEN: i32 = 64;
-const AUDIO_OUTPUT_DEADZONE: i32 = 8;
+const AUDIO_OUTPUT_DEADZONE: i32 = 5;
 const AUDIO_OUTPUT_POST_GAIN_NUM: i32 = 127;
 const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_THRESHOLD: i32 = 2_380;
 const AUDIO_OUTPUT_COMPRESS_NUM: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 74;
-const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 68;
+const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 67;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 129;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -1;
+const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 0;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_BIAS: i32 = -1;
 
@@ -120,6 +121,7 @@ pub(crate) struct Emulator {
     audio_delay_line: VecDeque<i32>,
     audio_filter_history: [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     audio_post_history: i16,
+    audio_post_history2: i16,
     active_dma_channel: Option<usize>,
     fifo_a: VecDeque<i8>,
     fifo_b: VecDeque<i8>,
@@ -177,6 +179,7 @@ impl Emulator {
             audio_delay_line: VecDeque::with_capacity(AUDIO_OUTPUT_DELAY_PAIRS + 1),
             audio_filter_history: [0; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
             audio_post_history: 0,
+            audio_post_history2: 0,
             active_dma_channel: None,
             fifo_a: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
             fifo_b: VecDeque::with_capacity(DIRECT_SOUND_FIFO_CAPACITY),
@@ -237,6 +240,7 @@ impl Emulator {
         self.audio_delay_line.clear();
         self.audio_filter_history.fill(0);
         self.audio_post_history = 0;
+        self.audio_post_history2 = 0;
         self.active_dma_channel = None;
         self.fifo_a.clear();
         self.fifo_b.clear();
@@ -420,10 +424,12 @@ impl Emulator {
             };
             let post_filtered = Self::round_divide(
                 biased * AUDIO_OUTPUT_POST_FILTER_CUR
-                    + i32::from(self.audio_post_history) * AUDIO_OUTPUT_POST_FILTER_PREV,
+                    + i32::from(self.audio_post_history) * AUDIO_OUTPUT_POST_FILTER_PREV
+                    + i32::from(self.audio_post_history2) * AUDIO_OUTPUT_POST_FILTER_PREV2,
                 AUDIO_OUTPUT_POST_FILTER_DEN,
             )
             .clamp(i16::MIN as i32, i16::MAX as i32);
+            self.audio_post_history2 = self.audio_post_history;
             self.audio_post_history = biased.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             if post_filtered == 0 {
                 0
@@ -1757,7 +1763,7 @@ mod tests {
         let (prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_000);
-        assert_eq!(output, -2_990);
+        assert_eq!(output, -2_991);
     }
 
     #[test]

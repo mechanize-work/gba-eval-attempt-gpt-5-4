@@ -9,11 +9,11 @@ const AUDIO_OUTPUT_POST_GAIN_DEN: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 
-const SEARCH_DEAD_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
-const SEARCH_THR_DELTAS: [i32; 5] = [-40, -20, 0, 20, 40];
-const SEARCH_CNUM_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
-const SEARCH_BIAS_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
-const SEARCH_POST_DELTAS: [i32; 5] = [-2, -1, 0, 1, 2];
+const SEARCH_DEAD_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+const SEARCH_THR_DELTAS: [i32; 7] = [-80, -40, -20, 0, 20, 40, 80];
+const SEARCH_CNUM_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+const SEARCH_BIAS_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+const SEARCH_POST_DELTAS: [i32; 9] = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AudioOutputParams {
@@ -24,6 +24,7 @@ struct AudioOutputParams {
     negative_bias: i32,
     post_filter_cur: i32,
     post_filter_prev: i32,
+    post_filter_prev2: i32,
     post_filter_bias: i32,
 }
 
@@ -31,13 +32,14 @@ impl Default for AudioOutputParams {
     fn default() -> Self {
         // Keep these in sync with the late-stage audio constants in `src/lib.rs`.
         Self {
-            deadzone: 8,
+            deadzone: 5,
             compress_threshold: 2_380,
             compress_num: 127,
             positive_bias: 74,
-            negative_bias: 68,
+            negative_bias: 67,
             post_filter_cur: 129,
             post_filter_prev: -1,
+            post_filter_prev2: 0,
             post_filter_bias: -1,
         }
     }
@@ -48,12 +50,14 @@ struct Dataset {
     label: String,
     prefilter: Vec<i16>,
     reference: Vec<i16>,
+    reference_first_nonzero_pair: usize,
 }
 
 #[derive(Clone)]
 struct CandidateScore {
     total_rmse: f64,
     rmses: Vec<f64>,
+    first_nonzero_pairs: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -65,11 +69,12 @@ enum ParamKind {
     NegativeBias,
     PostFilterCur,
     PostFilterPrev,
+    PostFilterPrev2,
     PostFilterBias,
 }
 
 impl ParamKind {
-    const ALL: [ParamKind; 8] = [
+    const ALL: [ParamKind; 9] = [
         ParamKind::Deadzone,
         ParamKind::CompressThreshold,
         ParamKind::CompressNum,
@@ -77,6 +82,7 @@ impl ParamKind {
         ParamKind::NegativeBias,
         ParamKind::PostFilterCur,
         ParamKind::PostFilterPrev,
+        ParamKind::PostFilterPrev2,
         ParamKind::PostFilterBias,
     ];
 
@@ -86,7 +92,10 @@ impl ParamKind {
             ParamKind::CompressThreshold => &SEARCH_THR_DELTAS,
             ParamKind::CompressNum => &SEARCH_CNUM_DELTAS,
             ParamKind::PositiveBias | ParamKind::NegativeBias => &SEARCH_BIAS_DELTAS,
-            ParamKind::PostFilterCur | ParamKind::PostFilterPrev | ParamKind::PostFilterBias => {
+            ParamKind::PostFilterCur
+            | ParamKind::PostFilterPrev
+            | ParamKind::PostFilterPrev2
+            | ParamKind::PostFilterBias => {
                 &SEARCH_POST_DELTAS
             }
         }
@@ -103,6 +112,7 @@ impl ParamKind {
             ParamKind::NegativeBias => params.negative_bias += delta,
             ParamKind::PostFilterCur => params.post_filter_cur = (params.post_filter_cur + delta).clamp(120, 136),
             ParamKind::PostFilterPrev => params.post_filter_prev = (params.post_filter_prev + delta).clamp(-8, 8),
+            ParamKind::PostFilterPrev2 => params.post_filter_prev2 = (params.post_filter_prev2 + delta).clamp(-8, 8),
             ParamKind::PostFilterBias => params.post_filter_bias += delta,
         }
     }
@@ -118,6 +128,8 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mut max_first_regression = 0.01f64;
+    let mut require_first_nonzero_match = false;
+    let mut start_params = AudioOutputParams::default();
     let mut positional = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -132,6 +144,42 @@ fn run() -> Result<(), String> {
                 if max_first_regression < 0.0 {
                     return Err("regression value must be nonnegative".to_string());
                 }
+            }
+            "--require-first-nonzero-match" => require_first_nonzero_match = true,
+            "--start-deadzone" => {
+                start_params.deadzone = parse_i32_arg(args.next(), "missing deadzone value")?.max(0);
+            }
+            "--start-threshold" => {
+                start_params.compress_threshold =
+                    parse_i32_arg(args.next(), "missing threshold value")?.max(0);
+            }
+            "--start-compress-num" => {
+                start_params.compress_num =
+                    parse_i32_arg(args.next(), "missing compress numerator value")?.clamp(120, 128);
+            }
+            "--start-positive-bias" => {
+                start_params.positive_bias =
+                    parse_i32_arg(args.next(), "missing positive bias value")?;
+            }
+            "--start-negative-bias" => {
+                start_params.negative_bias =
+                    parse_i32_arg(args.next(), "missing negative bias value")?;
+            }
+            "--start-post-filter-cur" => {
+                start_params.post_filter_cur =
+                    parse_i32_arg(args.next(), "missing post-filter cur value")?.clamp(120, 136);
+            }
+            "--start-post-filter-prev" => {
+                start_params.post_filter_prev =
+                    parse_i32_arg(args.next(), "missing post-filter prev value")?.clamp(-8, 8);
+            }
+            "--start-post-filter-prev2" => {
+                start_params.post_filter_prev2 =
+                    parse_i32_arg(args.next(), "missing post-filter prev2 value")?.clamp(-8, 8);
+            }
+            "--start-post-filter-bias" => {
+                start_params.post_filter_bias =
+                    parse_i32_arg(args.next(), "missing post-filter bias value")?;
             }
             _ => positional.push(arg),
         }
@@ -161,18 +209,32 @@ fn run() -> Result<(), String> {
             label: format!("{} -> {}", pair[0], pair[1]),
             prefilter: prefilter_channel[..len].to_vec(),
             reference: reference_channel[..len].to_vec(),
+            reference_first_nonzero_pair: first_nonzero_pair(&reference_channel[..len]),
         });
     }
 
-    let baseline_params = AudioOutputParams::default();
+    let baseline_params = start_params;
     let baseline = score_candidate(&datasets, baseline_params);
     print_score("baseline", baseline_params, &datasets, &baseline);
 
-    let best_params = search(&datasets, baseline_params, &baseline, max_first_regression);
+    let best_params = search(
+        &datasets,
+        baseline_params,
+        &baseline,
+        max_first_regression,
+        require_first_nonzero_match,
+    );
     let best_score = score_candidate(&datasets, best_params);
     print_score("best", best_params, &datasets, &best_score);
 
     Ok(())
+}
+
+fn parse_i32_arg(value: Option<String>, missing: &str) -> Result<i32, String> {
+    value
+        .ok_or_else(|| missing.to_string())?
+        .parse::<i32>()
+        .map_err(|_| missing.replace("missing", "invalid"))
 }
 
 fn search(
@@ -180,6 +242,7 @@ fn search(
     start: AudioOutputParams,
     baseline: &CandidateScore,
     max_first_regression: f64,
+    require_first_nonzero_match: bool,
 ) -> AudioOutputParams {
     let mut best_params = start;
     let mut best_score = baseline.clone();
@@ -200,6 +263,7 @@ fn search(
                     datasets,
                     baseline,
                     max_first_regression,
+                    require_first_nonzero_match,
                     candidate,
                     &mut round_best_params,
                     &mut round_best_score,
@@ -218,6 +282,7 @@ fn search(
                             datasets,
                             baseline,
                             max_first_regression,
+                            require_first_nonzero_match,
                             candidate,
                             &mut round_best_params,
                             &mut round_best_score,
@@ -244,12 +309,22 @@ fn consider_candidate(
     datasets: &[Dataset],
     baseline: &CandidateScore,
     max_first_regression: f64,
+    require_first_nonzero_match: bool,
     params: AudioOutputParams,
     best_params: &mut AudioOutputParams,
     best_score: &mut CandidateScore,
 ) {
     let score = score_candidate(datasets, params);
     if score.rmses[0] > baseline.rmses[0] + max_first_regression {
+        return;
+    }
+    if require_first_nonzero_match
+        && score
+            .first_nonzero_pairs
+            .iter()
+            .zip(datasets.iter())
+            .any(|(pair, dataset)| *pair != dataset.reference_first_nonzero_pair)
+    {
         return;
     }
     if score.total_rmse + 1e-9 < best_score.total_rmse {
@@ -261,40 +336,58 @@ fn consider_candidate(
 fn score_candidate(datasets: &[Dataset], params: AudioOutputParams) -> CandidateScore {
     let mut total = 0.0;
     let mut rmses = Vec::with_capacity(datasets.len());
+    let mut first_nonzero_pairs = Vec::with_capacity(datasets.len());
     for dataset in datasets {
-        let rmse = evaluate_dataset(dataset, params);
+        let (rmse, first_nonzero_pair) = evaluate_dataset(dataset, params);
         total += rmse;
         rmses.push(rmse);
+        first_nonzero_pairs.push(first_nonzero_pair);
     }
     CandidateScore {
         total_rmse: total,
         rmses,
+        first_nonzero_pairs,
     }
 }
 
-fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> f64 {
+fn evaluate_dataset(dataset: &Dataset, params: AudioOutputParams) -> (f64, usize) {
     let mut filter_history = [0i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1];
     let mut post_history = 0i16;
+    let mut post_history2 = 0i16;
     let mut error_sum = 0u128;
+    let mut first_nonzero_pair = dataset.reference.len();
 
-    for (&scaled, &reference) in dataset.prefilter.iter().zip(dataset.reference.iter()) {
+    for (idx, (&scaled, &reference)) in dataset
+        .prefilter
+        .iter()
+        .zip(dataset.reference.iter())
+        .enumerate()
+    {
         let output = filter_audio_sample(
             i32::from(scaled),
             &mut filter_history,
             &mut post_history,
+            &mut post_history2,
             params,
         );
+        if output != 0 && first_nonzero_pair == dataset.reference.len() {
+            first_nonzero_pair = idx;
+        }
         let error = i64::from(output) - i64::from(reference);
         error_sum += (error * error) as u128;
     }
 
-    (error_sum as f64 / dataset.reference.len() as f64).sqrt()
+    (
+        (error_sum as f64 / dataset.reference.len() as f64).sqrt(),
+        first_nonzero_pair,
+    )
 }
 
 fn filter_audio_sample(
     scaled: i32,
     filter_history: &mut [i32; AUDIO_OUTPUT_FILTER_TAPS.len() - 1],
     post_history: &mut i16,
+    post_history2: &mut i16,
     params: AudioOutputParams,
 ) -> i16 {
     let mut accum = AUDIO_OUTPUT_FILTER_TAPS[0] * scaled;
@@ -327,10 +420,13 @@ fn filter_audio_sample(
         compressed + params.negative_bias
     };
     let post_filtered = round_divide(
-        biased * params.post_filter_cur + i32::from(*post_history) * params.post_filter_prev,
+        biased * params.post_filter_cur
+            + i32::from(*post_history) * params.post_filter_prev
+            + i32::from(*post_history2) * params.post_filter_prev2,
         AUDIO_OUTPUT_POST_FILTER_DEN,
     )
     .clamp(i16::MIN as i32, i16::MAX as i32);
+    *post_history2 = *post_history;
     *post_history = biased.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     if post_filtered == 0 {
         0
@@ -342,7 +438,7 @@ fn filter_audio_sample(
 
 fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], score: &CandidateScore) {
     println!(
-        "{label} dead={} thr={} cnum={} pos_bias={} neg_bias={} cur={} prev={} post_bias={} total_rmse={:.6}",
+        "{label} dead={} thr={} cnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_bias={} total_rmse={:.6}",
         params.deadzone,
         params.compress_threshold,
         params.compress_num,
@@ -350,11 +446,19 @@ fn print_score(label: &str, params: AudioOutputParams, datasets: &[Dataset], sco
         params.negative_bias,
         params.post_filter_cur,
         params.post_filter_prev,
+        params.post_filter_prev2,
         params.post_filter_bias,
         score.total_rmse
     );
-    for (dataset, rmse) in datasets.iter().zip(score.rmses.iter()) {
-        println!("  rmse {:.6} {}", rmse, dataset.label);
+    for ((dataset, rmse), first_nonzero_pair) in datasets
+        .iter()
+        .zip(score.rmses.iter())
+        .zip(score.first_nonzero_pairs.iter())
+    {
+        println!(
+            "  rmse {:.6} first_nonzero={} ref={} {}",
+            rmse, first_nonzero_pair, dataset.reference_first_nonzero_pair, dataset.label
+        );
     }
 }
 
@@ -442,6 +546,13 @@ fn wav_first_channel(samples: &[i16], channels: u16) -> Vec<i16> {
         first.push(frame[0]);
     }
     first
+}
+
+fn first_nonzero_pair(samples: &[i16]) -> usize {
+    samples
+        .iter()
+        .position(|sample| *sample != 0)
+        .unwrap_or(samples.len())
 }
 
 fn round_divide(value: i32, denominator: i32) -> i32 {
