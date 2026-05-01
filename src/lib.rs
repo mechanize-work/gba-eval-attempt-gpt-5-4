@@ -660,6 +660,34 @@ impl Emulator {
         Ok(())
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn audio_params_for_debug(&self) -> String {
+        format!(
+            "dead={} icur={} iprev={} pregain={} pthr={} nthr={} pcnum={} ncnum={} pos_bias={} neg_bias={} cur={} prev={} prev2={} post_pos_bias={} post_neg_bias={} sign_hyst={} fcur={} fprev={} fprev2={} fprev3={} fnonzero={}",
+            self.audio_output_params.deadzone,
+            self.audio_output_params.input_filter_cur,
+            self.audio_output_params.input_filter_prev,
+            self.audio_output_params.prefilter_gain_num,
+            self.audio_output_params.compress_threshold_positive,
+            self.audio_output_params.compress_threshold_negative,
+            self.audio_output_params.compress_num_positive,
+            self.audio_output_params.compress_num_negative,
+            self.audio_output_params.positive_bias,
+            self.audio_output_params.negative_bias,
+            self.audio_output_params.post_filter_cur,
+            self.audio_output_params.post_filter_prev,
+            self.audio_output_params.post_filter_prev2,
+            self.audio_output_params.post_filter_positive_bias,
+            self.audio_output_params.post_filter_negative_bias,
+            self.audio_output_params.sign_hysteresis,
+            self.audio_output_params.final_filter_taps[0],
+            self.audio_output_params.final_filter_taps[1],
+            self.audio_output_params.final_filter_taps[2],
+            self.audio_output_params.final_filter_taps[3],
+            self.audio_output_params.final_nonzero_bias,
+        )
+    }
+
     fn round_divide(value: i32, denominator: i32) -> i32 {
         if value >= 0 {
             (value + denominator / 2) / denominator
@@ -1647,6 +1675,10 @@ impl NativeEmulator {
 
     pub fn set_audio_params_for_debug(&mut self, spec: &str) -> Result<(), String> {
         self.inner.set_audio_params_for_debug(spec)
+    }
+
+    pub fn audio_params_for_debug(&self) -> String {
+        self.inner.audio_params_for_debug()
     }
 
     pub fn set_keys(&mut self, keys: u32) {

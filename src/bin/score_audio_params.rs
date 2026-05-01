@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gba_emu::NativeEmulator;
@@ -29,6 +30,13 @@ struct AudioCompareMetrics {
     reference_first_nonzero_pair: usize,
     peak: i32,
     reference_peak: i32,
+}
+
+struct CandidateResult {
+    index: usize,
+    label: String,
+    aggregate_rmse: f64,
+    aggregate_peak_overage: i32,
 }
 
 fn main() {
@@ -75,6 +83,9 @@ fn run() -> Result<(), String> {
     }
 
     let rom = fs::read(&rom_path).map_err(|e| format!("failed to read ROM: {e}"))?;
+    let baseline_label = NativeEmulator::new_with_rom(&rom)
+        .ok_or_else(|| "failed to initialize emulator".to_string())?
+        .audio_params_for_debug();
     let datasets = dataset_args
         .into_iter()
         .map(|(frames, path)| {
@@ -84,17 +95,22 @@ fn run() -> Result<(), String> {
         .collect::<Result<Vec<_>, String>>()?;
 
     let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
     candidates.push(Candidate {
         label: "baseline".to_string(),
         spec: None,
     });
+    seen.insert("baseline".to_string());
+    seen.insert(baseline_label);
     for spec in candidate_specs {
-        candidates.push(Candidate {
-            label: compact_candidate_label(&spec),
-            spec: Some(spec),
-        });
+        let label = compact_candidate_label(&spec);
+        if !seen.insert(label.clone()) {
+            continue;
+        }
+        candidates.push(Candidate { label, spec: Some(spec) });
     }
 
+    let mut results = Vec::new();
     for (idx, candidate) in candidates.iter().enumerate() {
         let mut aggregate_rmse = 0.0;
         let mut aggregate_peak_overage = 0i32;
@@ -128,6 +144,27 @@ fn run() -> Result<(), String> {
         println!(
             "  aggregate_rmse={:.6} aggregate_peak_overage={}",
             aggregate_rmse, aggregate_peak_overage
+        );
+        results.push(CandidateResult {
+            index: idx,
+            label: candidate.label.clone(),
+            aggregate_rmse,
+            aggregate_peak_overage,
+        });
+    }
+
+    results.sort_by(|left, right| {
+        left.aggregate_rmse
+            .partial_cmp(&right.aggregate_rmse)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.aggregate_peak_overage.cmp(&right.aggregate_peak_overage))
+            .then(left.index.cmp(&right.index))
+    });
+    println!("summary");
+    for result in results {
+        println!(
+            "  aggregate_rmse={:.6} aggregate_peak_overage={} candidate[{}] {}",
+            result.aggregate_rmse, result.aggregate_peak_overage, result.index, result.label
         );
     }
 
