@@ -58,24 +58,24 @@ impl Default for AudioOutputParams {
             deadzone: 0,
             input_filter_cur: 136,
             input_filter_prev: -16,
-            prefilter_gain_num: 135,
-            compress_threshold_positive: 2_320,
+            prefilter_gain_num: 136,
+            compress_threshold_positive: 2_400,
             compress_threshold_negative: 2_100,
             compress_num_positive: 128,
-            compress_num_negative: 127,
-            positive_bias: 71,
-            negative_bias: 76,
+            compress_num_negative: 126,
+            positive_bias: 67,
+            negative_bias: 75,
             post_filter_cur: 136,
             post_filter_prev: -8,
             post_filter_prev2: 6,
-            post_filter_positive_bias: 3,
+            post_filter_positive_bias: 5,
             post_filter_negative_bias: -7,
-            sign_hysteresis: 32,
-            final_filter_cur: 127,
+            sign_hysteresis: 28,
+            final_filter_cur: 126,
             final_filter_prev: 0,
             final_filter_prev2: 4,
             final_filter_prev3: -8,
-            final_nonzero_bias: 1,
+            final_nonzero_bias: 2,
         }
     }
 }
@@ -231,9 +231,11 @@ fn run() -> Result<(), String> {
     let mut max_first_regression = 0.01f64;
     let mut max_improvements: Option<usize> = None;
     let mut max_peak_overage: Option<i32> = None;
+    let mut max_param_changes = 2usize;
     let mut peak_penalty_weight = 0.0f64;
     let mut require_first_nonzero_match = false;
     let mut raw_pair_input = false;
+    let mut top_candidates: Option<usize> = None;
     let mut start_params = AudioOutputParams::default();
     let mut positional = Vec::new();
 
@@ -272,6 +274,17 @@ fn run() -> Result<(), String> {
                 }
                 max_peak_overage = Some(parsed);
             }
+            "--max-param-changes" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing max param changes value".to_string())?;
+                max_param_changes = value
+                    .parse::<usize>()
+                    .map_err(|_| "max param changes value must be 1 or 2".to_string())?;
+                if !(1..=2).contains(&max_param_changes) {
+                    return Err("max param changes value must be 1 or 2".to_string());
+                }
+            }
             "--peak-penalty-weight" => {
                 let value = args
                     .next()
@@ -285,6 +298,16 @@ fn run() -> Result<(), String> {
             }
             "--require-first-nonzero-match" => require_first_nonzero_match = true,
             "--raw-pair-input" => raw_pair_input = true,
+            "--top-candidates" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing top candidates value".to_string())?;
+                top_candidates = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "top candidates value must be a nonnegative integer".to_string())?,
+                );
+            }
             "--start-deadzone" => {
                 start_params.deadzone = parse_i32_arg(args.next(), "missing deadzone value")?.max(0);
             }
@@ -386,7 +409,7 @@ fn run() -> Result<(), String> {
 
     if positional.len() < 2 || positional.len() % 2 != 0 {
         return Err(
-            "usage: tune_audio [--max-first-regression value] [--max-improvements count] [--max-peak-overage value] [--peak-penalty-weight value] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
+            "usage: tune_audio [--max-first-regression value] [--max-improvements count] [--max-peak-overage value] [--max-param-changes 1|2] [--peak-penalty-weight value] [--top-candidates count] [--raw-pair-input] <input.wav> <reference.wav> [<input.wav> <reference.wav> ...]"
                 .to_string(),
         );
     }
@@ -424,9 +447,11 @@ fn run() -> Result<(), String> {
         max_first_regression,
         max_improvements,
         max_peak_overage,
+        max_param_changes,
         peak_penalty_weight,
         require_first_nonzero_match,
         raw_pair_input,
+        top_candidates,
     );
     if let Some((best_params, best_score)) = best {
         print_score("best", best_params, &datasets, &best_score);
@@ -451,9 +476,11 @@ fn search(
     max_first_regression: f64,
     max_improvements: Option<usize>,
     max_peak_overage: Option<i32>,
+    max_param_changes: usize,
     peak_penalty_weight: f64,
     require_first_nonzero_match: bool,
     raw_pair_input: bool,
+    top_candidates: Option<usize>,
 ) -> Option<(AudioOutputParams, CandidateScore)> {
     let mut best = if (require_first_nonzero_match && !matches_first_nonzero(datasets, baseline))
         || !matches_peak_overage(datasets, baseline, max_peak_overage)
@@ -467,6 +494,7 @@ fn search(
     loop {
         let mut improved = false;
         let mut round_best = best.clone();
+        let mut round_top = Vec::new();
         let search_params = best
             .as_ref()
             .map(|(params, _)| *params)
@@ -489,7 +517,12 @@ fn search(
                     raw_pair_input,
                     candidate,
                     &mut round_best,
+                    &mut round_top,
+                    top_candidates,
                 );
+            }
+            if max_param_changes < 2 {
+                continue;
             }
             for second in ParamKind::ALL.iter().skip(i + 1) {
                 for &first_delta in first.deltas() {
@@ -510,9 +543,18 @@ fn search(
                             raw_pair_input,
                             candidate,
                             &mut round_best,
+                            &mut round_top,
+                            top_candidates,
                         );
                     }
                 }
+            }
+        }
+
+        if top_candidates.unwrap_or(0) > 0 {
+            for (idx, (params, score)) in round_top.iter().enumerate() {
+                let label = format!("candidate[{idx}]");
+                print_score(&label, *params, datasets, score);
             }
         }
 
@@ -554,6 +596,8 @@ fn consider_candidate(
     raw_pair_input: bool,
     params: AudioOutputParams,
     best: &mut Option<(AudioOutputParams, CandidateScore)>,
+    top: &mut Vec<(AudioOutputParams, CandidateScore)>,
+    top_limit: Option<usize>,
 ) {
     let score = score_candidate(datasets, params, raw_pair_input, peak_penalty_weight);
     if score.rmses[0] > baseline.rmses[0] + max_first_regression {
@@ -565,6 +609,7 @@ fn consider_candidate(
     if !matches_peak_overage(datasets, &score, max_peak_overage) {
         return;
     }
+    record_top_candidate(top, top_limit, params, &score);
     match best {
         Some((_, best_score)) if score.objective_total + 1e-9 < best_score.objective_total => {
             *best = Some((params, score));
@@ -573,6 +618,40 @@ fn consider_candidate(
             *best = Some((params, score));
         }
         _ => {}
+    }
+}
+
+fn record_top_candidate(
+    top: &mut Vec<(AudioOutputParams, CandidateScore)>,
+    top_limit: Option<usize>,
+    params: AudioOutputParams,
+    score: &CandidateScore,
+) {
+    let Some(limit) = top_limit else {
+        return;
+    };
+    if limit == 0 {
+        return;
+    }
+
+    if let Some((_, existing_score)) = top.iter_mut().find(|(existing_params, _)| *existing_params == params) {
+        if score.objective_total + 1e-9 < existing_score.objective_total {
+            *existing_score = score.clone();
+        } else {
+            return;
+        }
+    } else {
+        top.push((params, score.clone()));
+    }
+
+    top.sort_by(|(_, lhs), (_, rhs)| {
+        lhs.objective_total
+            .total_cmp(&rhs.objective_total)
+            .then_with(|| lhs.total_rmse.total_cmp(&rhs.total_rmse))
+            .then(lhs.total_peak_overage.cmp(&rhs.total_peak_overage))
+    });
+    if top.len() > limit {
+        top.truncate(limit);
     }
 }
 
