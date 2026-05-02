@@ -70,13 +70,13 @@ impl Default for AudioOutputParams {
             post_filter_prev: -8,
             post_filter_prev2: 6,
             post_filter_positive_bias: 10,
-            post_filter_negative_bias: -14,
-            sign_hysteresis: 28,
+            post_filter_negative_bias: -15,
+            sign_hysteresis: 12,
             final_filter_cur: 128,
             final_filter_prev: 0,
             final_filter_prev2: 0,
             final_filter_prev3: -8,
-            final_nonzero_bias: 3,
+            final_nonzero_bias: 4,
         }
     }
 }
