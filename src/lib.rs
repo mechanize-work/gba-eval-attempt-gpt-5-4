@@ -70,13 +70,13 @@ const DIRECT_SOUND_FIFO_DMA_THRESHOLD: usize = 16;
 const AUDIO_OUTPUT_SCALE: i32 = 64;
 const AUDIO_CAPTURE_DEFAULT_POINT_NUM: u32 = 2;
 const AUDIO_CAPTURE_DEFAULT_POINT_DEN: u32 = 7;
-const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 145;
+const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 143;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN: u32 = 512;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_NUM: u32 = 1;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_DEN: u32 = 1;
-const AUDIO_CAPTURE_DEFAULT_SHAPE_NUM: u32 = 89;
+const AUDIO_CAPTURE_DEFAULT_SHAPE_NUM: u32 = 86;
 const AUDIO_CAPTURE_DEFAULT_SHAPE_DEN: u32 = 160;
-const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 132;
+const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 128;
 const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 512;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
@@ -104,7 +104,7 @@ const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 6;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 4;
 const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -14;
-const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 26;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 24;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 1, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_FINAL_NONZERO_BIAS: i32 = 4;
@@ -335,7 +335,7 @@ impl Emulator {
             audio_pair_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
-            audio_capture_mode: AudioCaptureMode::PointSegmentEndpointBlend,
+            audio_capture_mode: AudioCaptureMode::PointSegmentLateLinearEndpointBlend,
             audio_mix_mode: AudioMixMode::Legacy,
             audio_output_params: AudioOutputParams::default(),
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
