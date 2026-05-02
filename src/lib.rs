@@ -81,8 +81,8 @@ const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 512;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
 const AUDIO_OUTPUT_GAIN_DEN: i32 = 4;
-const AUDIO_OUTPUT_INPUT_FILTER_CUR: i32 = 137;
-const AUDIO_OUTPUT_INPUT_FILTER_PREV: i32 = -18;
+const AUDIO_OUTPUT_INPUT_FILTER_CUR: i32 = 138;
+const AUDIO_OUTPUT_INPUT_FILTER_PREV: i32 = -19;
 const AUDIO_OUTPUT_INPUT_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_PREFILTER_GAIN_NUM: i32 = 137;
 const AUDIO_OUTPUT_PREFILTER_GAIN_DEN: i32 = 128;
@@ -4004,7 +4004,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[1029, 1029, 1057, 1057, 1019, 1019, 1319, 1319, 957, 957, 1094, 1094, 1176, 1176, 1063, 1063, 1084, 1084]
+            &[1037, 1037, 1058, 1058, 1019, 1019, 1322, 1322, 955, 955, 1096, 1096, 1176, 1176, 1062, 1062, 1084, 1084]
         );
     }
 
@@ -4016,8 +4016,8 @@ mod tests {
 
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
-        assert_eq!(prefilter, 4_582);
-        assert_eq!(output, 3_781);
+        assert_eq!(prefilter, 4_616);
+        assert_eq!(output, 3_808);
     }
 
     #[test]
@@ -4028,8 +4028,8 @@ mod tests {
 
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
-        assert_eq!(prefilter, -4_582);
-        assert_eq!(output, -3_629);
+        assert_eq!(prefilter, -4_616);
+        assert_eq!(output, -3_655);
     }
 
     #[test]
