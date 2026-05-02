@@ -127,8 +127,10 @@ enum AudioCaptureMode {
     PointPointBlend,
     PointWindowBlend,
     PointSegmentBlend,
+    PointSegmentEndpointBlend,
     PointSegmentHybridBlend,
     PointSegmentKneeLinearBlend,
+    PointSegmentKneeQuadraticBlend,
     PointSegmentLateLinearBlend,
     PointSegmentLinearBlend,
     PointSegmentQuadraticBlend,
@@ -602,10 +604,14 @@ impl Emulator {
             AudioCaptureMode::PointPointBlend => {
                 self.emit_point_point_blend_audio_pairs(pairs, left, right)
             }
+            AudioCaptureMode::PointSegmentEndpointBlend => {
+                self.emit_point_segment_endpoint_blend_audio_pairs(pairs, left, right)
+            }
             AudioCaptureMode::PointWindowBlend
             | AudioCaptureMode::PointSegmentBlend
             | AudioCaptureMode::PointSegmentHybridBlend
             | AudioCaptureMode::PointSegmentKneeLinearBlend
+            | AudioCaptureMode::PointSegmentKneeQuadraticBlend
             | AudioCaptureMode::PointSegmentLateLinearBlend
             | AudioCaptureMode::PointSegmentLinearBlend
             | AudioCaptureMode::PointSegmentQuadraticBlend
@@ -647,8 +653,10 @@ impl Emulator {
             | AudioCaptureMode::PointPointBlend
             | AudioCaptureMode::PointWindowBlend
             | AudioCaptureMode::PointSegmentBlend
+            | AudioCaptureMode::PointSegmentEndpointBlend
             | AudioCaptureMode::PointSegmentHybridBlend
             | AudioCaptureMode::PointSegmentKneeLinearBlend
+            | AudioCaptureMode::PointSegmentKneeQuadraticBlend
             | AudioCaptureMode::PointSegmentLateLinearBlend
             | AudioCaptureMode::PointSegmentLinearBlend
             | AudioCaptureMode::PointSegmentQuadraticBlend
@@ -735,6 +743,7 @@ impl Emulator {
             self.audio_capture_mode,
             AudioCaptureMode::PointSegmentHybridBlend
                 | AudioCaptureMode::PointSegmentKneeLinearBlend
+                | AudioCaptureMode::PointSegmentKneeQuadraticBlend
                 | AudioCaptureMode::PointSegmentLateLinearBlend
                 | AudioCaptureMode::PointSegmentLinearBlend
                 | AudioCaptureMode::PointSegmentQuadraticBlend
@@ -745,6 +754,28 @@ impl Emulator {
                 let first_weight = i64::from(capture_start - window_start + 1);
                 let last_weight = i64::from(capture_end - window_start);
                 (first_weight + last_weight) * capture_cycle_count / 2
+            } else if self.audio_capture_mode == AudioCaptureMode::PointSegmentKneeQuadraticBlend {
+                let segment_cycles = i64::from(window_end - window_start);
+                if segment_cycles <= 1 {
+                    capture_cycle_count
+                } else {
+                    let max_offset = segment_cycles - 1;
+                    let threshold =
+                        (max_offset * i64::from(self.audio_capture_shape_num))
+                            / i64::from(self.audio_capture_shape_den);
+                    if threshold >= max_offset {
+                        capture_cycle_count
+                    } else {
+                        let ramp_len = max_offset - threshold;
+                        let base = ramp_len * ramp_len;
+                        let offset_start = i64::from(capture_start - window_start);
+                        let offset_end_inclusive = i64::from(capture_end - window_start - 1);
+                        let delta_start = (offset_start.max(threshold + 1)) - threshold;
+                        let delta_end = offset_end_inclusive - threshold;
+                        let delta_square_sum = Self::sum_of_squares_inclusive(delta_start, delta_end);
+                        capture_cycle_count * base + delta_square_sum
+                    }
+                }
             } else if self.audio_capture_mode == AudioCaptureMode::PointSegmentKneeLinearBlend {
                 let segment_cycles = i64::from(window_end - window_start);
                 if segment_cycles <= 1 {
@@ -874,6 +905,25 @@ impl Emulator {
         self.emit_audio_pairs_from_capture(pairs, mixed_left, mixed_right);
     }
 
+    fn emit_point_segment_endpoint_blend_audio_pairs(&mut self, pairs: usize, left: i32, right: i32) {
+        let point = self.audio_point_capture_sample(left, right);
+        let segment = self.audio_window_capture_sample();
+        let endpoint = Self::clamp_capture_sample(left, right);
+        let tail = Self::blend_capture_samples(
+            segment,
+            endpoint,
+            self.audio_capture_shape_num,
+            self.audio_capture_shape_den,
+        );
+        let mixed = Self::blend_capture_samples(
+            point,
+            tail,
+            self.audio_capture_blend_num,
+            self.audio_capture_blend_den,
+        );
+        self.emit_audio_pairs_from_capture(pairs, mixed.0, mixed.1);
+    }
+
     fn audio_average_capture_sample(&self) -> (i16, i16) {
         let avg_left = (self.audio_accum_left / i64::from(self.audio_accum_cycles))
             .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
@@ -906,6 +956,7 @@ impl Emulator {
             self.audio_capture_mode,
             AudioCaptureMode::PointSegmentLateLinearBlend
                 | AudioCaptureMode::PointSegmentKneeLinearBlend
+                | AudioCaptureMode::PointSegmentKneeQuadraticBlend
                 | AudioCaptureMode::PointSegmentLinearBlend
                 | AudioCaptureMode::PointSegmentQuadraticBlend
                 | AudioCaptureMode::PointSegmentRampBlend
@@ -1356,6 +1407,86 @@ impl Emulator {
                     blend_num,
                     blend_den,
                 )
+            } else if let Some(rest) = mode.strip_prefix("point-segment-endpoint-blend:") {
+                let mut parts = rest.split(':');
+                let Some(point_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(start_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(end_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(endpoint_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(blend_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                if parts.next().is_some() {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                    ));
+                }
+                let (point_num, point_den) =
+                    Self::parse_audio_capture_fraction(point_text, mode, false).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                        )
+                    })?;
+                let (start_num, start_den) =
+                    Self::parse_audio_capture_fraction(start_text, mode, true).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den> with 0 <= start_num <= start_den)"
+                        )
+                    })?;
+                let (window_num, window_den) =
+                    Self::parse_audio_capture_fraction(end_text, mode, false).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>)"
+                        )
+                    })?;
+                if u64::from(start_num) * u64::from(window_den) >= u64::from(window_num) * u64::from(start_den) {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend with start < end)"
+                    ));
+                }
+                let (shape_num, shape_den) =
+                    Self::parse_audio_capture_fraction(endpoint_text, mode, true).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den> with 0 <= endpoint_num <= endpoint_den)"
+                        )
+                    })?;
+                let (blend_num, blend_den) =
+                    Self::parse_audio_capture_fraction(blend_text, mode, true).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den> with 0 <= blend_num <= blend_den)"
+                        )
+                    })?;
+                (
+                    AudioCaptureMode::PointSegmentEndpointBlend,
+                    point_num,
+                    point_den,
+                    start_num,
+                    start_den,
+                    window_num,
+                    window_den,
+                    shape_num,
+                    shape_den,
+                    blend_num,
+                    blend_den,
+                )
             } else if let Some(rest) = mode.strip_prefix("point-segment-hybrid-blend:") {
                 let mut parts = rest.split(':');
                 let Some(point_text) = parts.next() else {
@@ -1518,6 +1649,88 @@ impl Emulator {
                     blend_num,
                     blend_den,
                 )
+            } else if let Some(rest) = mode.strip_prefix("point-segment-knee-quadratic-blend:") {
+                let mut parts = rest.split(':');
+                let Some(point_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(start_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(end_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(knee_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                let Some(blend_text) = parts.next() else {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                    ));
+                };
+                if parts.next().is_some() {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                    ));
+                }
+                let (point_num, point_den) =
+                    Self::parse_audio_capture_fraction(point_text, mode, false).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                        )
+                    })?;
+                let (start_num, start_den) =
+                    Self::parse_audio_capture_fraction(start_text, mode, true).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den> with 0 <= start_num <= start_den)"
+                        )
+                    })?;
+                let (window_num, window_den) =
+                    Self::parse_audio_capture_fraction(end_text, mode, false).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>)"
+                        )
+                    })?;
+                if u64::from(start_num) * u64::from(window_den)
+                    >= u64::from(window_num) * u64::from(start_den)
+                {
+                    return Err(format!(
+                        "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend with start < end)"
+                    ));
+                }
+                let (shape_num, shape_den) =
+                    Self::parse_audio_capture_fraction(knee_text, mode, true).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den> with 0 <= knee_num <= knee_den)"
+                        )
+                    })?;
+                let (blend_num, blend_den) =
+                    Self::parse_audio_capture_fraction(blend_text, mode, true).map_err(|_| {
+                        format!(
+                            "invalid audio capture mode: {mode} (expected point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den> with 0 <= blend_num <= blend_den)"
+                        )
+                    })?;
+                (
+                    AudioCaptureMode::PointSegmentKneeQuadraticBlend,
+                    point_num,
+                    point_den,
+                    start_num,
+                    start_den,
+                    window_num,
+                    window_den,
+                    shape_num,
+                    shape_den,
+                    blend_num,
+                    blend_den,
+                )
             } else if let Some((rest, capture_mode, mode_name)) = mode
                 .strip_prefix("point-segment-blend:")
                 .map(|rest| (rest, AudioCaptureMode::PointSegmentBlend, "point-segment-blend"))
@@ -1624,7 +1837,7 @@ impl Emulator {
                     }
                     _ => {
                         return Err(format!(
-                            "invalid audio capture mode: {mode} (expected average, midpoint, point:<num>/<den>, point-blend:<num>/<den>:<blend_num>/<blend_den>, point-point-blend:<num>/<den>:<other_num>/<other_den>:<blend_num>/<blend_den>, point-window-blend:<num>/<den>:<window_num>/<window_den>:<blend_num>/<blend_den>, point-segment-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-hybrid-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<shape_num>/<shape_den>:<blend_num>/<blend_den>, point-segment-knee-linear-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>, point-segment-late-linear-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-linear-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-ramp-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, endpoint, or endpoint-after-timer)"
+                            "invalid audio capture mode: {mode} (expected average, midpoint, point:<num>/<den>, point-blend:<num>/<den>:<blend_num>/<blend_den>, point-point-blend:<num>/<den>:<other_num>/<other_den>:<blend_num>/<blend_den>, point-window-blend:<num>/<den>:<window_num>/<window_den>:<blend_num>/<blend_den>, point-segment-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-endpoint-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<endpoint_num>/<endpoint_den>:<blend_num>/<blend_den>, point-segment-hybrid-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<shape_num>/<shape_den>:<blend_num>/<blend_den>, point-segment-knee-linear-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>, point-segment-knee-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<knee_num>/<knee_den>:<blend_num>/<blend_den>, point-segment-late-linear-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-linear-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-quadratic-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, point-segment-ramp-blend:<num>/<den>:<start_num>/<start_den>:<end_num>/<end_den>:<blend_num>/<blend_den>, endpoint, or endpoint-after-timer)"
                         ))
                     }
                 }
@@ -1782,6 +1995,19 @@ impl Emulator {
                 self.audio_capture_blend_num,
                 self.audio_capture_blend_den
             ),
+            AudioCaptureMode::PointSegmentEndpointBlend => format!(
+                "point-segment-endpoint-blend:{}/{}:{}/{}:{}/{}:{}/{}:{}/{}",
+                self.audio_capture_point_num,
+                self.audio_capture_point_den,
+                self.audio_capture_window_start_num,
+                self.audio_capture_window_start_den,
+                self.audio_capture_window_num,
+                self.audio_capture_window_den,
+                self.audio_capture_shape_num,
+                self.audio_capture_shape_den,
+                self.audio_capture_blend_num,
+                self.audio_capture_blend_den
+            ),
             AudioCaptureMode::PointSegmentHybridBlend => format!(
                 "point-segment-hybrid-blend:{}/{}:{}/{}:{}/{}:{}/{}:{}/{}",
                 self.audio_capture_point_num,
@@ -1797,6 +2023,19 @@ impl Emulator {
             ),
             AudioCaptureMode::PointSegmentKneeLinearBlend => format!(
                 "point-segment-knee-linear-blend:{}/{}:{}/{}:{}/{}:{}/{}:{}/{}",
+                self.audio_capture_point_num,
+                self.audio_capture_point_den,
+                self.audio_capture_window_start_num,
+                self.audio_capture_window_start_den,
+                self.audio_capture_window_num,
+                self.audio_capture_window_den,
+                self.audio_capture_shape_num,
+                self.audio_capture_shape_den,
+                self.audio_capture_blend_num,
+                self.audio_capture_blend_den
+            ),
+            AudioCaptureMode::PointSegmentKneeQuadraticBlend => format!(
+                "point-segment-knee-quadratic-blend:{}/{}:{}/{}:{}/{}:{}/{}:{}/{}",
                 self.audio_capture_point_num,
                 self.audio_capture_point_den,
                 self.audio_capture_window_start_num,
@@ -3933,6 +4172,48 @@ mod tests {
     }
 
     #[test]
+    fn point_segment_knee_quadratic_blend_matches_flat_segment_at_full_knee() {
+        let mut knee = Emulator::new();
+        knee.audio_capture_mode = AudioCaptureMode::PointSegmentKneeQuadraticBlend;
+        knee.audio_capture_point_num = 3;
+        knee.audio_capture_point_den = 4;
+        knee.audio_capture_window_start_num = 1;
+        knee.audio_capture_window_start_den = 4;
+        knee.audio_capture_window_num = 3;
+        knee.audio_capture_window_den = 4;
+        knee.audio_capture_shape_num = 1;
+        knee.audio_capture_shape_den = 1;
+        knee.audio_capture_blend_num = 1;
+        knee.audio_capture_blend_den = 2;
+        knee.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 8;
+        knee.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        knee.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        let mut flat = Emulator::new();
+        flat.audio_capture_mode = AudioCaptureMode::PointSegmentBlend;
+        flat.audio_capture_point_num = 3;
+        flat.audio_capture_point_den = 4;
+        flat.audio_capture_window_start_num = 1;
+        flat.audio_capture_window_start_den = 4;
+        flat.audio_capture_window_num = 3;
+        flat.audio_capture_window_den = 4;
+        flat.audio_capture_blend_num = 1;
+        flat.audio_capture_blend_den = 2;
+        flat.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 8;
+        flat.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        flat.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        for sample in [1i8, 2, 3, 4, 5, 6, 7, 8] {
+            knee.direct_sound_a_sample = sample;
+            flat.direct_sound_a_sample = sample;
+            knee.emit_audio_for_cycles(1);
+            flat.emit_audio_for_cycles(1);
+        }
+
+        assert_eq!(knee.audio_pair_input_buffer, flat.audio_pair_input_buffer);
+    }
+
+    #[test]
     fn point_segment_late_linear_blend_only_raises_weights_near_segment_end() {
         let mut emu = Emulator::new();
         emu.audio_capture_mode = AudioCaptureMode::PointSegmentLateLinearBlend;
@@ -4034,6 +4315,147 @@ mod tests {
             2,
         )
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+        assert_eq!(emu.audio_pair_input_buffer, vec![expected, expected]);
+    }
+
+    #[test]
+    fn point_segment_knee_quadratic_blend_curves_the_post_knee_tail() {
+        let mut flat = Emulator::new();
+        flat.audio_capture_mode = AudioCaptureMode::PointSegmentBlend;
+        flat.audio_capture_point_num = 3;
+        flat.audio_capture_point_den = 4;
+        flat.audio_capture_window_start_num = 1;
+        flat.audio_capture_window_start_den = 4;
+        flat.audio_capture_window_num = 3;
+        flat.audio_capture_window_den = 4;
+        flat.audio_capture_blend_num = 1;
+        flat.audio_capture_blend_den = 2;
+        flat.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 16;
+        flat.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        flat.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        let mut knee_quadratic = Emulator::new();
+        knee_quadratic.audio_capture_mode = AudioCaptureMode::PointSegmentKneeQuadraticBlend;
+        knee_quadratic.audio_capture_point_num = 3;
+        knee_quadratic.audio_capture_point_den = 4;
+        knee_quadratic.audio_capture_window_start_num = 1;
+        knee_quadratic.audio_capture_window_start_den = 4;
+        knee_quadratic.audio_capture_window_num = 3;
+        knee_quadratic.audio_capture_window_den = 4;
+        knee_quadratic.audio_capture_shape_num = 1;
+        knee_quadratic.audio_capture_shape_den = 2;
+        knee_quadratic.audio_capture_blend_num = 1;
+        knee_quadratic.audio_capture_blend_den = 2;
+        knee_quadratic.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 16;
+        knee_quadratic.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        knee_quadratic.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        let mut quadratic = Emulator::new();
+        quadratic.audio_capture_mode = AudioCaptureMode::PointSegmentQuadraticBlend;
+        quadratic.audio_capture_point_num = 3;
+        quadratic.audio_capture_point_den = 4;
+        quadratic.audio_capture_window_start_num = 1;
+        quadratic.audio_capture_window_start_den = 4;
+        quadratic.audio_capture_window_num = 3;
+        quadratic.audio_capture_window_den = 4;
+        quadratic.audio_capture_blend_num = 1;
+        quadratic.audio_capture_blend_den = 2;
+        quadratic.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 16;
+        quadratic.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        quadratic.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        for sample in [1i8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+            flat.direct_sound_a_sample = sample;
+            knee_quadratic.direct_sound_a_sample = sample;
+            quadratic.direct_sound_a_sample = sample;
+            flat.emit_audio_for_cycles(1);
+            knee_quadratic.emit_audio_for_cycles(1);
+            quadratic.emit_audio_for_cycles(1);
+        }
+
+        let flat_capture = flat.audio_pair_input_buffer[0];
+        let knee_quadratic_capture = knee_quadratic.audio_pair_input_buffer[0];
+        let quadratic_capture = quadratic.audio_pair_input_buffer[0];
+
+        assert!(flat_capture <= knee_quadratic_capture);
+        assert!(knee_quadratic_capture < quadratic_capture);
+    }
+
+    #[test]
+    fn point_segment_endpoint_blend_matches_segment_blend_at_zero_endpoint_mix() {
+        let mut endpoint = Emulator::new();
+        endpoint.audio_capture_mode = AudioCaptureMode::PointSegmentEndpointBlend;
+        endpoint.audio_capture_point_num = 3;
+        endpoint.audio_capture_point_den = 4;
+        endpoint.audio_capture_window_start_num = 1;
+        endpoint.audio_capture_window_start_den = 4;
+        endpoint.audio_capture_window_num = 3;
+        endpoint.audio_capture_window_den = 4;
+        endpoint.audio_capture_shape_num = 0;
+        endpoint.audio_capture_shape_den = 1;
+        endpoint.audio_capture_blend_num = 1;
+        endpoint.audio_capture_blend_den = 2;
+        endpoint.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 8;
+        endpoint.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        endpoint.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        let mut segment = Emulator::new();
+        segment.audio_capture_mode = AudioCaptureMode::PointSegmentBlend;
+        segment.audio_capture_point_num = 3;
+        segment.audio_capture_point_den = 4;
+        segment.audio_capture_window_start_num = 1;
+        segment.audio_capture_window_start_den = 4;
+        segment.audio_capture_window_num = 3;
+        segment.audio_capture_window_den = 4;
+        segment.audio_capture_blend_num = 1;
+        segment.audio_capture_blend_den = 2;
+        segment.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 8;
+        segment.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        segment.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        for sample in [1i8, 2, 3, 4, 5, 6, 7, 8] {
+            endpoint.direct_sound_a_sample = sample;
+            segment.direct_sound_a_sample = sample;
+            endpoint.emit_audio_for_cycles(1);
+            segment.emit_audio_for_cycles(1);
+        }
+
+        assert_eq!(endpoint.audio_pair_input_buffer, segment.audio_pair_input_buffer);
+    }
+
+    #[test]
+    fn point_segment_endpoint_blend_can_mix_tail_average_with_endpoint() {
+        let mut emu = Emulator::new();
+        emu.audio_capture_mode = AudioCaptureMode::PointSegmentEndpointBlend;
+        emu.audio_capture_point_num = 3;
+        emu.audio_capture_point_den = 4;
+        emu.audio_capture_window_start_num = 1;
+        emu.audio_capture_window_start_den = 4;
+        emu.audio_capture_window_num = 3;
+        emu.audio_capture_window_den = 4;
+        emu.audio_capture_shape_num = 1;
+        emu.audio_capture_shape_den = 2;
+        emu.audio_capture_blend_num = 1;
+        emu.audio_capture_blend_den = 2;
+        emu.audio_fraction = CPU_CLOCK_HZ as u64 - DEFAULT_AUDIO_RATE as u64 * 8;
+        emu.write_io_u16(REG_SOUNDCNT_X, 0x0080);
+        emu.write_io_u16(REG_SOUNDCNT_H, 0x0100);
+
+        let mut samples = [0i16; 8];
+        for (idx, sample) in [1i8, 2, 3, 4, 5, 6, 7, 8].into_iter().enumerate() {
+            emu.direct_sound_a_sample = sample;
+            samples[idx] = emu.mix_audio_level().0 as i16;
+            emu.emit_audio_for_cycles(1);
+        }
+
+        let segment_avg =
+            ((i32::from(samples[2]) + i32::from(samples[3]) + i32::from(samples[4]) + i32::from(samples[5])) / 4)
+                as i16;
+        let tail =
+            Emulator::blend_capture_samples((segment_avg, segment_avg), (samples[7], samples[7]), 1, 2).0;
+        let expected = Emulator::round_divide(i32::from(samples[5]) + i32::from(tail), 2)
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
         assert_eq!(emu.audio_pair_input_buffer, vec![expected, expected]);
     }
@@ -4201,6 +4623,28 @@ mod tests {
     }
 
     #[test]
+    fn audio_capture_mode_parser_accepts_point_segment_endpoint_blends() {
+        let mut emu = NativeEmulator { inner: Emulator::new() };
+
+        emu.set_audio_capture_mode_for_debug(
+            "point-segment-endpoint-blend:3/4:1/4:3/4:1/2:1/4",
+        )
+        .unwrap();
+
+        assert_eq!(emu.inner.audio_capture_mode, AudioCaptureMode::PointSegmentEndpointBlend);
+        assert_eq!(emu.inner.audio_capture_point_num, 3);
+        assert_eq!(emu.inner.audio_capture_point_den, 4);
+        assert_eq!(emu.inner.audio_capture_window_start_num, 1);
+        assert_eq!(emu.inner.audio_capture_window_start_den, 4);
+        assert_eq!(emu.inner.audio_capture_window_num, 3);
+        assert_eq!(emu.inner.audio_capture_window_den, 4);
+        assert_eq!(emu.inner.audio_capture_shape_num, 1);
+        assert_eq!(emu.inner.audio_capture_shape_den, 2);
+        assert_eq!(emu.inner.audio_capture_blend_num, 1);
+        assert_eq!(emu.inner.audio_capture_blend_den, 4);
+    }
+
+    #[test]
     fn audio_capture_mode_parser_accepts_point_segment_hybrid_blends() {
         let mut emu = NativeEmulator { inner: Emulator::new() };
 
@@ -4230,6 +4674,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(emu.inner.audio_capture_mode, AudioCaptureMode::PointSegmentKneeLinearBlend);
+        assert_eq!(emu.inner.audio_capture_point_num, 3);
+        assert_eq!(emu.inner.audio_capture_point_den, 4);
+        assert_eq!(emu.inner.audio_capture_window_start_num, 1);
+        assert_eq!(emu.inner.audio_capture_window_start_den, 4);
+        assert_eq!(emu.inner.audio_capture_window_num, 3);
+        assert_eq!(emu.inner.audio_capture_window_den, 4);
+        assert_eq!(emu.inner.audio_capture_shape_num, 1);
+        assert_eq!(emu.inner.audio_capture_shape_den, 2);
+        assert_eq!(emu.inner.audio_capture_blend_num, 1);
+        assert_eq!(emu.inner.audio_capture_blend_den, 4);
+    }
+
+    #[test]
+    fn audio_capture_mode_parser_accepts_point_segment_knee_quadratic_blends() {
+        let mut emu = NativeEmulator { inner: Emulator::new() };
+
+        emu.set_audio_capture_mode_for_debug(
+            "point-segment-knee-quadratic-blend:3/4:1/4:3/4:1/2:1/4",
+        )
+        .unwrap();
+
+        assert_eq!(emu.inner.audio_capture_mode, AudioCaptureMode::PointSegmentKneeQuadraticBlend);
         assert_eq!(emu.inner.audio_capture_point_num, 3);
         assert_eq!(emu.inner.audio_capture_point_den, 4);
         assert_eq!(emu.inner.audio_capture_window_start_num, 1);
@@ -4328,6 +4794,21 @@ mod tests {
     }
 
     #[test]
+    fn audio_capture_mode_for_debug_round_trips_segment_endpoint_mode() {
+        let mut emu = NativeEmulator { inner: Emulator::new() };
+
+        emu.set_audio_capture_mode_for_debug(
+            "point-segment-endpoint-blend:3/4:1/4:3/4:1/2:1/4",
+        )
+        .unwrap();
+
+        assert_eq!(
+            emu.audio_capture_mode_for_debug(),
+            "point-segment-endpoint-blend:3/4:1/4:3/4:1/2:1/4"
+        );
+    }
+
+    #[test]
     fn audio_capture_mode_for_debug_round_trips_segment_hybrid_mode() {
         let mut emu = NativeEmulator { inner: Emulator::new() };
 
@@ -4352,6 +4833,21 @@ mod tests {
         assert_eq!(
             emu.audio_capture_mode_for_debug(),
             "point-segment-knee-linear-blend:3/4:1/4:3/4:1/2:1/4"
+        );
+    }
+
+    #[test]
+    fn audio_capture_mode_for_debug_round_trips_segment_knee_quadratic_mode() {
+        let mut emu = NativeEmulator { inner: Emulator::new() };
+
+        emu.set_audio_capture_mode_for_debug(
+            "point-segment-knee-quadratic-blend:3/4:1/4:3/4:1/2:1/4",
+        )
+        .unwrap();
+
+        assert_eq!(
+            emu.audio_capture_mode_for_debug(),
+            "point-segment-knee-quadratic-blend:3/4:1/4:3/4:1/2:1/4"
         );
     }
 
