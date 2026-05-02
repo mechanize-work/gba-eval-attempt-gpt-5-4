@@ -74,9 +74,9 @@ const AUDIO_CAPTURE_DEFAULT_WINDOW_START_NUM: u32 = 145;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_START_DEN: u32 = 512;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_NUM: u32 = 1;
 const AUDIO_CAPTURE_DEFAULT_WINDOW_DEN: u32 = 1;
-const AUDIO_CAPTURE_DEFAULT_SHAPE_NUM: u32 = 21;
-const AUDIO_CAPTURE_DEFAULT_SHAPE_DEN: u32 = 32;
-const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 150;
+const AUDIO_CAPTURE_DEFAULT_SHAPE_NUM: u32 = 1;
+const AUDIO_CAPTURE_DEFAULT_SHAPE_DEN: u32 = 2;
+const AUDIO_CAPTURE_DEFAULT_BLEND_NUM: u32 = 148;
 const AUDIO_CAPTURE_DEFAULT_BLEND_DEN: u32 = 512;
 const AUDIO_OUTPUT_DELAY_PAIRS: usize = 165;
 const AUDIO_OUTPUT_GAIN_NUM: i32 = 1;
@@ -97,14 +97,14 @@ const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 71;
-const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 74;
+const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 73;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 136;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -8;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 6;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 4;
 const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -14;
-const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 22;
+const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 24;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 1, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
 const AUDIO_OUTPUT_FINAL_NONZERO_BIAS: i32 = 4;
@@ -334,7 +334,7 @@ impl Emulator {
             audio_pair_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_input_buffer: Vec::with_capacity(4_096),
             audio_prefilter_buffer: Vec::with_capacity(4_096),
-            audio_capture_mode: AudioCaptureMode::PointSegmentKneeLinearBlend,
+            audio_capture_mode: AudioCaptureMode::PointSegmentEndpointBlend,
             audio_mix_mode: AudioMixMode::Legacy,
             audio_output_params: AudioOutputParams::default(),
             initial_audio_fraction: INITIAL_AUDIO_FRACTION,
