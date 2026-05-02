@@ -97,7 +97,7 @@ const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
 const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 71;
-const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 73;
+const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 74;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 136;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -8;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 6;
@@ -4693,7 +4693,7 @@ mod tests {
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_649);
-        assert_eq!(output, -3_684);
+        assert_eq!(output, -3_683);
     }
 
     #[test]
