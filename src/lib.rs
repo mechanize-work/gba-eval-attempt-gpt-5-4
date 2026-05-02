@@ -96,14 +96,14 @@ const AUDIO_OUTPUT_COMPRESS_THRESHOLD_NEGATIVE: i32 = 2_080;
 const AUDIO_OUTPUT_COMPRESS_NUM_POSITIVE: i32 = 128;
 const AUDIO_OUTPUT_COMPRESS_NUM_NEGATIVE: i32 = 127;
 const AUDIO_OUTPUT_COMPRESS_DEN: i32 = 128;
-const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 66;
+const AUDIO_OUTPUT_POSITIVE_BIAS: i32 = 70;
 const AUDIO_OUTPUT_NEGATIVE_BIAS: i32 = 69;
 const AUDIO_OUTPUT_POST_FILTER_CUR: i32 = 136;
 const AUDIO_OUTPUT_POST_FILTER_PREV: i32 = -8;
 const AUDIO_OUTPUT_POST_FILTER_PREV2: i32 = 6;
 const AUDIO_OUTPUT_POST_FILTER_DEN: i32 = 128;
-const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 5;
-const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -11;
+const AUDIO_OUTPUT_POST_FILTER_POSITIVE_BIAS: i32 = 9;
+const AUDIO_OUTPUT_POST_FILTER_NEGATIVE_BIAS: i32 = -18;
 const AUDIO_OUTPUT_SIGN_HYSTERESIS: i32 = 28;
 const AUDIO_OUTPUT_FINAL_FILTER_TAPS: [i32; 4] = [128, 0, 0, -8];
 const AUDIO_OUTPUT_FINAL_FILTER_DEN: i32 = 128;
@@ -4004,7 +4004,7 @@ mod tests {
         );
         assert_eq!(
             &emu.audio_buffer[emu.audio_buffer.len() - 18..],
-            &[1011, 1011, 1052, 1052, 1008, 1008, 1304, 1304, 951, 951, 1079, 1079, 1165, 1165, 1052, 1052, 1072, 1072]
+            &[1019, 1019, 1060, 1060, 1017, 1017, 1312, 1312, 959, 959, 1087, 1087, 1172, 1172, 1060, 1060, 1079, 1079]
         );
     }
 
@@ -4017,7 +4017,7 @@ mod tests {
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, 4_516);
-        assert_eq!(output, 3_724);
+        assert_eq!(output, 3_732);
     }
 
     #[test]
@@ -4029,7 +4029,7 @@ mod tests {
         let (_, prefilter, output) = emu.filter_audio_output(0);
 
         assert_eq!(prefilter, -4_516);
-        assert_eq!(output, -3_568);
+        assert_eq!(output, -3_575);
     }
 
     #[test]
