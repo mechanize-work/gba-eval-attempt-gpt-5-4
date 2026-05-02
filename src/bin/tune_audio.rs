@@ -57,9 +57,9 @@ impl Default for AudioOutputParams {
         // Keep these in sync with the late-stage audio constants in `src/lib.rs`.
         Self {
             deadzone: 0,
-            input_filter_cur: 136,
-            input_filter_prev: -16,
-            prefilter_gain_num: 136,
+            input_filter_cur: 137,
+            input_filter_prev: -18,
+            prefilter_gain_num: 137,
             compress_threshold_positive: 2_400,
             compress_threshold_negative: 2_080,
             compress_num_positive: 128,
